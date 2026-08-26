@@ -31,8 +31,13 @@ class AgentResult(TypedDict, total=False):
 class _OfflineTools:
     """离线模式：不调用模型/网络，用本地检索给出可运行的演示结果。
 
-    与 ReAct Agent 保持一致的 invoke(messages) 接口，返回标准消息列表，
-    保证 ask() 的解析逻辑（.get('messages')）在离线与在线模式都能工作。
+    定位：演示 RAG 检索链路（文档检索 -> 返回片段），而非模拟完整对话。
+    与 ReAct Agent 保持一致的 invoke(messages) 接口。
+
+    行为：
+    - 文档相关问题 -> 返回检索结果片段（含相似度）
+    - 检索不到 -> 提示换一种与文档相关的问法
+    - 明显闲聊/非文档问题 -> 说明离线模式的能力边界
     """
 
     def invoke(self, state: dict) -> dict:
@@ -45,17 +50,24 @@ class _OfflineTools:
         from config import TOP_K
         from retriever import search as _search
 
-        hits = _search(question, top_k=TOP_K)
+        # 离线模式用更高的阈值，避免"1+1"这种无关问题误命中文档
+        hits = _search(question, top_k=TOP_K, min_score=0.1)
         if hits:
-            answer = (
-                f"[离线演示] 以下为本地文档检索结果（未调用模型）：\n"
-                f"命中 {len(hits)} 个片段，最高相似度 {hits[0]['score']:.3f}\n\n"
-                f"{hits[0]['chunk'][:500]}"
-            )
+            # 文档相关问题：返回检索到的片段
+            parts = [
+                f"[离线演示] 以下为本地文档检索结果（未调用模型）：",
+                f"命中 {len(hits)} 个片段，最高相似度 {hits[0]['score']:.3f}",
+            ]
+            for i, h in enumerate(hits, 1):
+                parts.append(f"\n[{i}] 来源: {h['source']}\n{h['chunk'][:400]}")
+            answer = "\n".join(parts)
         else:
+            # 无检索结果：区分原因，给出更有用的提示
             answer = (
-                "[离线演示] 当前为离线模式（LLM_PROVIDER=offline），无法调用模型或联网。"
-                "请配置 DeepSeek/OpenAI API Key 获得完整能力。"
+                "[离线演示] 离线模式只能在本地文档知识库中检索相关内容。\n"
+                "当前问题在文档中未检索到匹配内容，请尝试：\n"
+                "1. 问与项目文档相关的问题（如：这个项目用什么技术栈？）\n"
+                "2. 或切换到在线模式（页面顶部按钮）获得完整能力（对话/天气/联网搜索）"
             )
         return {"messages": [{"role": "assistant", "content": answer}]}
 
