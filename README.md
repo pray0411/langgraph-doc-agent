@@ -37,6 +37,10 @@ python -X utf8 main.py web
 
 > Windows 命令行中文乱码时，请使用 `python -X utf8 main.py ...`（网页端无此问题）。
 
+> ⚠️ **修改代码后记得重启网页服务**：Python 服务启动时会把模块加载进内存，
+> 改了 `tools.py` / `graph.py` 等代码后，必须停止旧服务（Ctrl+C 或结束进程）
+> 再重新 `python -X utf8 main.py web` 启动，新代码才生效。
+
 ## 架构：ReAct 模式
 
 ```
