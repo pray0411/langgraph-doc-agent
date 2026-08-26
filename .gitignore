@@ -11,3 +11,7 @@ venv/
 # 构建产物
 index/
 *.log
+
+# 临时凭据文件（禁止提交）
+_token.txt
+_device_code.txt
