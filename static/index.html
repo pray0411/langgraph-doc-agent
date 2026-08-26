@@ -75,11 +75,16 @@ const modeBtns = document.querySelectorAll('.mode-btn');
 const modeStatus = document.getElementById('modeStatus');
 let currentMode = 'deepseek';
 
-// 加载当前模式
+// 加载当前模式 + 动态显示可用模式按钮
 async function loadMode() {
   try {
     const resp = await fetch('/api/mode');
     const data = await resp.json();
+    const avail = data.available_modes || ['deepseek', 'offline'];
+    // 只显示可用的模式按钮（如 Ollama 未安装则不显示）
+    modeBtns.forEach(b => {
+      b.style.display = avail.includes(b.dataset.mode) ? '' : 'none';
+    });
     setModeUI(data.mode);
   } catch (e) { /* 服务未就绪时保持默认 */ }
 }

@@ -47,6 +47,28 @@ def set_mode(mode: str):
     _current_mode = mode
 
 
+def is_ollama_available() -> bool:
+    """检测本地 Ollama 服务是否可用（http://localhost:11434）。"""
+    import socket
+
+    try:
+        from config import OLLAMA_BASE_URL
+        host = OLLAMA_BASE_URL.replace("http://", "").replace("https://", "").split(":")[0]
+        port = int(OLLAMA_BASE_URL.split(":")[-1].split("/")[0])
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def available_modes() -> list[str]:
+    """返回当前可用的模式列表（ollama 仅在本地服务可用时包含）。"""
+    modes = ["deepseek", "offline"]
+    if is_ollama_available():
+        modes.insert(1, "ollama")
+    return modes
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         if self.path in ("/", "/index.html"):
@@ -58,7 +80,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/health":
             self._json({"status": "ok"})
         elif self.path == "/api/mode":
-            self._json({"mode": get_mode()})
+            self._json({"mode": get_mode(), "available_modes": available_modes()})
         else:
             self.send_error(404)
 
