@@ -44,8 +44,10 @@
   <div class="mode-bar">
     <span>运行模式：</span>
     <button class="mode-btn" data-mode="deepseek">在线 (DeepSeek)</button>
-    <button class="mode-btn" data-mode="offline">离线 (本地检索)</button>
+    <button class="mode-btn" data-mode="ollama">本地 (Ollama)</button>
+    <button class="mode-btn" data-mode="offline">纯检索 (免费)</button>
     <span class="mode-status" id="modeStatus"></span>
+  </div>
   </div>
 
   <div class="input-area">
@@ -93,7 +95,12 @@ async function switchMode(mode) {
   if (data.error) { alert('切换失败: ' + data.error); return; }
   setModeUI(data.mode);
   answerEl.className = 'loading';
-  answerEl.textContent = '已切换到 ' + (data.mode === 'offline' ? '离线模式（不联网，仅本地文档检索）' : '在线模式（DeepSeek）') + '，可以提问了';
+  const tips = {
+    'deepseek': '在线模式（DeepSeek，完整能力：天气/搜索/对话）',
+    'ollama': '本地模型模式（Ollama，免费离线对话）',
+    'offline': '纯检索模式（免费，仅本地文档检索）'
+  };
+  answerEl.textContent = '已切换到 ' + (tips[data.mode] || data.mode) + '，可以提问了';
 }
 
 function setModeUI(mode) {
@@ -101,9 +108,12 @@ function setModeUI(mode) {
   modeBtns.forEach(b => {
     b.classList.toggle('active', b.dataset.mode === mode);
   });
-  modeStatus.textContent = mode === 'offline'
-    ? '当前：离线模式（免费，仅本地检索）'
-    : '当前：在线模式（DeepSeek，完整能力）';
+  const status = {
+    'deepseek': '当前：在线模式（DeepSeek，完整能力）',
+    'ollama': '当前：本地模型（Ollama，免费离线对话）',
+    'offline': '当前：纯检索（免费，仅本地文档）'
+  };
+  modeStatus.textContent = status[mode] || ('当前：' + mode);
 }
 
 // 绑定模式按钮

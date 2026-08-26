@@ -1,10 +1,19 @@
-"""模型封装：支持 DeepSeek / OpenAI / 离线演示三种模式。
+"""模型封装：支持 DeepSeek / OpenAI / Ollama(本地) / 离线检索四种模式。
 
 统一接口 generate(prompt, system) -> str。
-- deepseek/openai: 走 OpenAI 兼容 API
-- offline: 不调 API，直接把提示词返回（用于无 Key 演示与测试）
+- deepseek/openai: 走 OpenAI 兼容 API（需 Key）
+- ollama: 走本地 Ollama 的 OpenAI 兼容接口（免费离线，需装 Ollama）
+- offline: 不调模型，仅本地文档检索演示
 """
-from config import DEEPSEEK_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_PROVIDER, OPENAI_API_KEY
+from config import (
+    DEEPSEEK_API_KEY,
+    LLM_BASE_URL,
+    LLM_MODEL,
+    LLM_PROVIDER,
+    OLLAMA_BASE_URL,
+    OLLAMA_MODEL,
+    OPENAI_API_KEY,
+)
 
 
 class LLMError(RuntimeError):
@@ -12,7 +21,7 @@ class LLMError(RuntimeError):
 
 
 class _OfflineLLM:
-    """离线演示模型：不调用外部 API。
+    """离线检索演示：不调用外部 API。
 
     从 prompt 中提取「文档内容」段落返回，模拟一个基于文档的回答，
     让无 API Key 的环境也能完整跑通并验证 RAG 链路。
@@ -54,11 +63,24 @@ class _OpenAICompatLLM:
             raise LLMError(f"模型调用失败: {exc}") from exc
 
 
+class _OllamaLLM(_OpenAICompatLLM):
+    """本地 Ollama 模型：走 OpenAI 兼容接口（http://localhost:11434/v1）。
+
+    Ollama 提供 OpenAI 兼容端点，无需 API Key（任意占位即可）。
+    """
+
+    def __init__(self, base_url: str = OLLAMA_BASE_URL, model: str = OLLAMA_MODEL):
+        super().__init__(api_key="ollama", base_url=base_url, model=model)
+
+
 def build_llm() -> _OfflineLLM | _OpenAICompatLLM:
     """根据 LLM_PROVIDER 构建模型实例。"""
     provider = LLM_PROVIDER.lower()
     if provider == "offline":
         return _OfflineLLM()
+    if provider == "ollama":
+        # Ollama 本地模型：免费离线对话；未安装时给出清晰提示
+        return _OllamaLLM()
     if provider == "deepseek":
         if not DEEPSEEK_API_KEY:
             raise LLMError("未配置 DEEPSEEK_API_KEY，请在 .env 中填写或使用 LLM_PROVIDER=offline")

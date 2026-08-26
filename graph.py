@@ -75,12 +75,24 @@ class _OfflineTools:
 def build_agent(mode: str | None = None):
     """构建通用 Agent。离线模式返回本地检索实现，在线模式用 ReAct Agent。
 
-    mode: 可选，显式指定模式（deepseek/openai/offline）；不传则用配置默认值。
+    mode: 可选，显式指定模式（deepseek/openai/ollama/offline）；不传则用配置默认值。
     支持运行时动态切换（如网页端按钮切换）。
     """
     provider = (mode or LLM_PROVIDER).lower()
     if provider == "offline":
         return _OfflineTools()
+
+    from config import OLLAMA_BASE_URL, OLLAMA_MODEL
+
+    if provider == "ollama":
+        # 本地 Ollama 模型：OpenAI 兼容接口，无需 API Key
+        model = ChatOpenAI(
+            model=OLLAMA_MODEL,
+            api_key="ollama",  # Ollama 忽略 Key，占位即可
+            base_url=OLLAMA_BASE_URL,
+            temperature=0.3,
+        )
+        return create_react_agent(model=model, tools=[search_documents, web_search, get_weather])
 
     api_key = DEEPSEEK_API_KEY if provider == "deepseek" else None
     base_url = LLM_BASE_URL or ("https://api.deepseek.com/v1" if provider == "deepseek" else None)

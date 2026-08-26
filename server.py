@@ -27,8 +27,7 @@ MAX_BODY = 10 * 1024
 REQUEST_TIMEOUT = 60
 
 # 有效模式
-VALID_MODES = ("deepseek", "openai", "offline")
-
+VALID_MODES = ("deepseek", "openai", "ollama", "offline")
 # 当前运行模式（默认读取 .env 的 LLM_PROVIDER，可通过 /api/mode 动态切换）
 _current_mode = None
 
