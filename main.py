@@ -5,6 +5,8 @@
     python main.py ask "问题"    # 提问（单轮）
     python main.py web           # 启动网页服务 (默认 127.0.0.1:8000)
     python main.py web --port 9000
+
+提示: Windows 命令行中文乱码时，请使用 `python -X utf8 main.py ...`
 """
 import argparse
 import sys
@@ -28,7 +30,7 @@ def cmd_web(host: str, port: int):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LangGraph 智能文档问答 Agent")
+    parser = argparse.ArgumentParser(description="通用 AI Agent（LangGraph ReAct）")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_build = sub.add_parser("build", help="构建文档索引")

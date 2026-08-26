@@ -1,4 +1,6 @@
 langgraph>=0.2.60
 langchain-core>=0.3.0
+langchain-openai>=0.2.0
 openai>=1.40.0
+duckduckgo-search>=6.0.0
 python-dotenv>=1.0.0

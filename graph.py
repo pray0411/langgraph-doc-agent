@@ -1,167 +1,78 @@
-"""LangGraph 智能文档问答 Agent 状态图。
+"""通用 Agent：基于 LangGraph create_react_agent 构建（ReAct 模式）。
 
-流程：用户提问
-  -> route_query（判断是否文档相关）
-  -> retrieve（工具调用：TF-IDF 检索 top_k）
-  -> human_review（人工确认检索结果，human-in-the-loop）
-  -> generate（模型结合检索上下文生成回答）
-  -> reflect（反思：回答是否基于文档，可修正）
+核心思想：不再用规则判断"该走哪条路"，而是把工具交给模型，
+由模型自主决定：
+  - 文档问题 -> 调用 search_documents
+  - 实时问题 -> 调用 web_search / get_weather
+  - 普通对话 -> 直接回答
+  - 需要多步 -> 连续调用多个工具（思考 -> 行动 -> 观察 -> 再思考）
 
-节点与边的设计对应 LangGraph 的 StateGraph + conditional edges。
+这是 LangGraph 最主流的 Agent 架构（ReAct / Tool-calling Agent）。
 """
-import json
-from typing import Literal, TypedDict
+from typing import TypedDict
 
-from langgraph.graph import END, START, StateGraph
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
 
-from llm import build_llm
-from retriever import search
+from config import DEEPSEEK_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_PROVIDER
+from tools import get_weather, search_documents, web_search
 
-# ---------------- 状态定义 ----------------
 
-class AgentState(TypedDict, total=False):
-    question: str
-    intent: str
-    retrieved: list[dict]
-    confirmed: bool
+class AgentResult(TypedDict, total=False):
     answer: str
-    reflection: str
-    messages: list[str]  # 供演示使用的过程日志
+    messages: list[str]
 
 
-# ---------------- 节点 ----------------
+class _OfflineTools:
+    """离线模式：不调用模型，直接尝试文档检索，返回结果。"""
 
-def route_query(state: AgentState) -> AgentState:
-    """意图路由：判断问题是否与文档内容相关。"""
-    question = state["question"]
-    hits = search(question, top_k=1)
-    intent = "doc_qa" if hits and hits[0]["score"] > 0.01 else "general"
-    return {"intent": intent, "messages": [f"[路由] 识别意图: {intent}"]}
+    def invoke(self, question: str):
+        from retriever import search as _search
 
-
-def general_chat(state: AgentState) -> AgentState:
-    """通用对话节点：非文档问题直接调用模型回答（不经过检索）。"""
-    question = state["question"]
-    system = "你是一个友好的 AI 助手。回答使用中文，简洁准确。"
-    prompt = f"问题：{question}\n\n请回答："
-    llm = build_llm()
-    try:
-        answer = llm.generate(prompt, system=system)
-    except Exception as exc:  # noqa: BLE001
-        answer = f"（模型暂不可用，请稍后再试。错误：{exc}）"
-    state["answer"] = answer
-    state["messages"] = state.get("messages", []) + [f"[通用对话] 回答完成（{len(answer)} 字）"]
-    return state
+        hits = _search(question, top_k=2)
+        if hits:
+            return f"[离线演示] 文档检索到相关片段：\n{hits[0]['chunk'][:500]}"
+        return (
+            "[离线演示] 当前为离线模式（LLM_PROVIDER=offline），无法联网或调用模型。"
+            "请配置 DeepSeek/OpenAI API Key 获得完整能力。"
+        )
 
 
-def retrieve(state: AgentState) -> AgentState:
-    """工具调用节点：从文档索引检索相关内容。"""
-    hits = search(state["question"], top_k=3)
-    state["retrieved"] = hits
-    state["messages"] = state.get("messages", []) + [
-        f"[检索] 召回 {len(hits)} 个片段，top1 相似度 {hits[0]['score']:.3f}" if hits else "[检索] 未命中"
-    ]
-    return state
+def build_agent():
+    """构建通用 Agent。离线模式返回简化实现，在线模式用 ReAct Agent。"""
+    provider = LLM_PROVIDER.lower()
+    if provider == "offline":
+        return _OfflineTools()
+
+    api_key = DEEPSEEK_API_KEY if provider == "deepseek" else None
+    base_url = LLM_BASE_URL or ("https://api.deepseek.com/v1" if provider == "deepseek" else None)
+    model = ChatOpenAI(
+        model=LLM_MODEL,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=0.3,
+    )
+    return create_react_agent(model=model, tools=[search_documents, web_search, get_weather])
 
 
-def human_review(state: AgentState) -> AgentState:
-    """人工确认节点（human-in-the-loop）。
+def ask(question: str, confirmed: bool = True, show_log: bool = False) -> tuple[str, AgentResult]:
+    """对外问答入口：执行一次 Agent 推理，返回 (回答, 结果详情)。"""
+    agent = build_agent()
+    result = agent.invoke({"messages": [{"role": "user", "content": question}]})
+    messages = result.get("messages", [])
+    answer = messages[-1].content if messages else ""
 
-    演示模式（confirmed 未提供或为 True）直接放行；
-    生产可接入人工审批接口，只有确认后才进入生成。
-    """
-    confirmed = state.get("confirmed", True)
-    state["messages"] = state.get("messages", []) + [
-        f"[人工确认] {'通过' if confirmed else '拒绝'}"
-    ]
-    return state
+    # 提取过程日志（仅显示 AI/工具消息摘要）
+    log = []
+    for m in messages:
+        role = getattr(m, "type", "")
+        content = getattr(m, "content", "")
+        if role == "ai" and content:
+            log.append(f"[模型] {content[:120]}")
+        elif role == "tool":
+            log.append(f"[工具调用] {content[:120]}")
 
-
-def generate(state: AgentState) -> AgentState:
-    """生成节点：把检索结果组装进提示词，调用模型回答。"""
-    question = state["question"]
-    hits = state.get("retrieved", [])
-
-    if not hits:
-        answer = "没有在文档中找到相关内容，请换一种问法，或补充文档后再试。"
-    else:
-        context = "\n\n".join(f"【来自 {h['source']}】\n{h['chunk']}" for h in hits[:3])
-        system = "你是一个严谨的文档问答助手。请只依据提供的文档内容回答；"
-        system += "如果文档不足以回答问题，明确说明'文档中没有提到'。回答使用中文，简洁准确。"
-        prompt = f"文档内容：\n{context}\n\n问题：{question}\n\n请回答："
-        llm = build_llm()
-        answer = llm.generate(prompt, system=system)
-
-    state["answer"] = answer
-    state["messages"] = state.get("messages", []) + [f"[生成] 回答完成（{len(answer)} 字）"]
-    return state
-
-
-def reflect(state: AgentState) -> AgentState:
-    """反思节点：评估回答质量与来源，输出反思记录。"""
-    question = state["question"]
-    answer = state.get("answer", "")
-    hits = state.get("retrieved", [])
-    grounded = any(_contains_any(answer, h["chunk"]) for h in hits) if hits else False
-    reflection = {
-        "问题": question,
-        "是否基于文档": grounded,
-        "引用片段数": len(hits),
-        "回答长度": len(answer),
-    }
-    state["reflection"] = json.dumps(reflection, ensure_ascii=False, indent=2)
-    state["messages"] = state.get("messages", []) + [f"[反思] {reflection['是否基于文档']}"]
-    return state
-
-
-def _contains_any(answer: str, chunk: str) -> bool:
-    """简单判断回答是否与某片段存在重叠词（粗粒度 grounded 检查）。"""
-    if not answer or not chunk:
-        return False
-    words = set(w for w in chunk.replace("\n", " ").split() if len(w) > 1)
-    return sum(1 for w in words if w in answer) >= 2
-
-
-def should_continue(state: AgentState) -> Literal["retrieve", "general_chat"]:
-    """路由后的条件边：文档相关 -> 检索；通用问题 -> 通用对话。"""
-    if state["intent"] == "general":
-        return "general_chat"
-    return "retrieve"
-
-
-def should_continue_after_review(state: AgentState) -> Literal["generate", "end"]:
-    """人工确认后的条件边：确认通过 -> 生成；拒绝 -> 结束。"""
-    if not state.get("confirmed", True):
-        return "end"
-    return "generate"
-
-
-# ---------------- 图构建 ----------------
-
-def build_graph():
-    g = StateGraph(AgentState)
-    g.add_node("route", route_query)
-    g.add_node("retrieve", retrieve)
-    g.add_node("human", human_review)
-    g.add_node("generate", generate)
-    g.add_node("reflect", reflect)
-    g.add_node("general", general_chat)
-
-    g.add_edge(START, "route")
-    g.add_conditional_edges("route", should_continue, {"retrieve": "retrieve", "general_chat": "general"})
-    g.add_edge("general", END)
-    g.add_edge("retrieve", "human")
-    g.add_conditional_edges("human", should_continue_after_review, {"generate": "generate", "end": END})
-    g.add_edge("generate", "reflect")
-    g.add_edge("reflect", END)
-    return g.compile()
-
-
-def ask(question: str, confirmed: bool = True, show_log: bool = False) -> str:
-    """对外问答入口：构建图并执行一次完整推理，返回回答文本。"""
-    app = build_graph()
-    result = app.invoke({"question": question, "confirmed": confirmed})
     if show_log:
-        for m in result.get("messages", []):
-            print(m)
-    return result.get("answer", ""), result
+        for line in log:
+            print(line)
+    return str(answer), {"answer": str(answer), "messages": log}
