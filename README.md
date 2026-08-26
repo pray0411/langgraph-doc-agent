@@ -1,17 +1,17 @@
-# LangGraph 智能文档问答 Agent
+# 通用 AI Agent（LangGraph ReAct）
 
-基于 [LangGraph](https://github.com/langchain-ai/langgraph) 构建的智能文档问答 Agent。用自然语言对本地文档集合提问，Agent 通过 **意图路由 → 向量检索 → 人工确认 → 模型生成 → 回答反思** 的状态图流程给出基于文档的回答。
+基于 [LangGraph](https://github.com/langchain-ai/langgraph) 构建的**通用 AI Agent**，能够回答任何问题：文档问答、联网搜索实时信息（天气/新闻）、普通对话，全部由**模型自主决策**调用工具完成。
 
-> 这是一个从零搭建的 Agent 工程练手项目：状态图编排、RAG 检索、human-in-the-loop、可插拔模型、CLI + Web 双入口。
+> 从"专用文档问答 Agent"升级而来。核心变化：不再用规则判断"该走哪条路"，而是把工具交给模型，由模型自主决定何时调用什么工具（ReAct / Tool-calling 架构，LangGraph 最主流的 Agent 模式）。
 
-## 核心特性
+## 核心能力
 
-- 🧠 **LangGraph 状态图编排**：5 个节点 + 条件边，完整展示 Agent 工作流
-- 📚 **RAG 检索**：本地 TF-IDF 稀疏向量 + 余弦相似度，零外部依赖，离线可运行
-- 🤖 **可插拔模型**：DeepSeek / OpenAI 兼容 API / 离线演示模式，一键切换
-- 🧑‍💻 **human-in-the-loop**：检索后人工确认节点，体现工程可靠性设计
-- 🔍 **回答反思**：输出 grounded 检查与质量反思记录
-- 🌐 **双入口**：命令行问答 + 网页问答（纯标准库，零第三方前端依赖）
+| 能力 | 工具 | 示例 |
+|---|---|---|
+| 📄 文档问答（RAG） | `search_documents` | "项目的核心架构是什么？" |
+| 🌤️ 实时天气 | `get_weather` | "今天北京的天气怎么样？" |
+| 🔍 联网搜索 | `web_search` | "最近有什么 AI 新闻？" |
+| 💬 普通对话 | （直答） | "你好，你是谁？" |
 
 ## 快速开始
 
@@ -19,135 +19,107 @@
 # 1. 安装依赖
 pip install -r requirements.txt
 
-## 配置模型（可选）
+# 2. 配置模型（.env）
+#    LLM_PROVIDER=deepseek
+#    DEEPSEEK_API_KEY=sk-xxx
 
-默认**离线模式**，无需任何 API Key 即可完整演示。想接真实大模型，复制 `.env.example` 为 `.env` 并填写：
-
-```ini
-# DeepSeek（国内直连，推荐练手）
-LLM_PROVIDER=deepseek
-DEEPSEEK_API_KEY=sk-xxxx
-LLM_MODEL=deepseek-chat
-
-# 或 OpenAI
-# LLM_PROVIDER=openai
-# OPENAI_API_KEY=sk-xxxx
-
-# 或离线演示
-# LLM_PROVIDER=offline
-```
-
-> ⚠️ `.env` 已加入 `.gitignore`，API Key 不会进入版本库。
+# 3. 构建文档索引（可选，用于文档问答）
 python main.py build
 
-# 3a. 命令行提问
-python main.py ask "这个项目的核心架构是什么？"
+# 4a. 命令行问答
+python -X utf8 main.py ask "今天北京的天气怎么样？"
+python -X utf8 main.py ask "这个项目的技术栈是什么？"
 
-# 3b. 或启动网页问答
-python main.py web          # 浏览器访问 http://127.0.0.1:8000
-python main.py web --port 9000
+# 4b. 网页问答（推荐）
+python -X utf8 main.py web
+# 浏览器打开 http://127.0.0.1:8000
 ```
 
-## 配置模型（可选）
+> Windows 命令行中文乱码时，请使用 `python -X utf8 main.py ...`（网页端无此问题）。
 
-默认**离线模式**，无需任何 API Key 即可完整演示。想接真实大模型，复制 `.env.example` 为 `.env` 并填写：
-
-```ini
-# DeepSeek（国内直连，推荐练手）
-LLM_PROVIDER=deepseek
-DEEPSEEK_API_KEY=sk-xxxx
-LLM_MODEL=deepseek-chat
-
-# 或 OpenAI
-# LLM_PROVIDER=openai
-# OPENAI_API_KEY=sk-xxxx
-
-# 或离线演示
-# LLM_PROVIDER=offline
-```
-
-## 工作流程
+## 架构：ReAct 模式
 
 ```
 用户提问
    │
    ▼
-┌─────────────┐   文档相关?    ┌─────────────┐
-│ route_query │──────────────▶│  retrieve   │  TF-IDF 检索 top-K
-└─────────────┘  否           └─────────────┘
-   │ 结束                           │
-                                    ▼
-                              ┌─────────────┐   确认通过?
-                              │ human_review│──────────────┐
-                              └─────────────┘   否         │
-                                    │ 是                    │
-                                    ▼                       │
-                              ┌─────────────┐               │
-                              │  generate   │               │
-                              └─────────────┘               │
-                                    │                       │
-                                    ▼                       │
-                              ┌─────────────┐               │
-                              │   reflect   │               │
-                              └─────────────┘               │
-                                    │                       │
-                                    ▼                       ▼
-                                 回答                   结束
+┌─────────────────────────────────────────┐
+│          ReAct Agent（create_react_agent）│
+│                                         │
+│  模型自主循环：                          │
+│    思考(Reason) → 行动(Act/调工具)      │
+│    → 观察(Observe) → 再思考 → ...      │
+│                                         │
+│  工具集：                               │
+│    search_documents  (本地文档 RAG)     │
+│    get_weather        (实时天气)        │
+│    web_search         (联网搜索)        │
+└─────────────────────────────────────────┘
+   │
+   ▼
+  最终回答
 ```
+
+**关键点**：模型根据问题内容自主决定：
+- 问天气 → 调 `get_weather`
+- 问文档 → 调 `search_documents`
+- 问实时信息 → 调 `web_search`
+- 普通聊天 → 直接回答，不调工具
+- 复杂任务 → 连续调用多个工具
 
 ## 目录结构
 
 ```
 langgraph-doc-agent/
-├── config.py        # 全局配置（环境变量）
-├── retriever.py     # 文档加载、切分、TF-IDF 索引与检索
-├── llm.py           # 模型封装（DeepSeek / OpenAI / 离线）
-├── graph.py         # LangGraph 状态图定义与节点逻辑 ★ 核心
-├── server.py        # 网页问答服务（http.server）
+├── graph.py         # ★ 核心：create_react_agent 通用 Agent
+├── graph_v1.py      # V1 版：规则路由的专用文档问答（留档对比）
+├── tools.py         # 工具集：search_documents / web_search / get_weather
+├── retriever.py     # TF-IDF 检索（文档问答底层）
+├── llm.py           # 模型封装（V1 遗留，保留兼容）
+├── server.py        # 网页服务
 ├── main.py          # 命令行入口
+├── config.py        # 配置
 ├── requirements.txt
 ├── .env.example
-├── docs/            # 文档目录：放进去的文件会被索引
-│   └── project_intro.md
+├── docs/            # 文档知识库
 ├── static/          # 网页前端
-│   └── index.html
-└── index/           # 构建生成的索引（自动创建）
+└── index/           # 检索索引
 ```
 
 ## 实现要点（面试可讲）
 
-### 状态设计
-`AgentState` 用 `TypedDict` 定义，节点间通过 state 传递 `question / intent / retrieved / confirmed / answer / reflection / messages`，体现 LangGraph 的"状态即数据流"设计。
+### 1. ReAct 架构
+用 `create_react_agent(model, tools)` 构建，模型在循环中自主决定：
+`思考 → 调用工具 → 观察结果 → 再思考`，直到给出最终回答。
 
-### 条件边
-- `route` 之后：`doc_qa` → retrieve，`general` → 结束
-- `human_review` 之后：确认通过 → generate，拒绝 → 结束
+### 2. 工具封装
+用 `@tool` 装饰器定义工具（名称、描述、参数 schema 自动生成），模型通过函数调用来"使用"工具。工具描述写得越清楚，模型越会正确选择。
 
-### human-in-the-loop
-`confirmed` 字段控制是否放行生成节点。演示默认放行，生产可改为异步人工审批接口。
+### 3. 模型自主 vs 规则路由
+- **V1（规则路由）**：用相似度阈值判断走哪条路，硬编码、不灵活
+- **V2（模型自主）**：模型根据语义自己选工具，能处理任何问题，可扩展
 
-### grounded 反思
-`reflect` 节点用检索片段与回答的重叠词粗粒度判断"是否基于文档"，输出反思记录，可扩展为更严谨的引用校验。
+### 4. 升级过程（真实迭代）
+从 V1 到 V2 的升级：新增 `tools.py`、用 `create_react_agent` 重构、修复若干集成问题（import、编码、缩进）。这个"踩坑→解决"过程是真实的工程经验，commit 历史完整保留。
 
 ## 常见问题
 
-**Q: 检索效果一般？**
-A: 本地 TF-IDF 是词面匹配，对同义词不敏感。可升级为 embedding 向量检索（如 BGE/OpenAI embedding）或 BM25 混合检索。
+**Q: 天气查询用的什么？**
+A: `get_weather` 调用 wttr.in 公开接口，无需 API Key，返回城市实时天气。
 
-**Q: 如何加文档？**
-A: 把 `.md/.txt/.py/.rst/.html` 文件放进 `docs/`（支持子目录），重新 `python main.py build` 即可。
+**Q: 联网搜索用的什么？**
+A: DuckDuckGo Search（`duckduckgo_search` 包），加了 `region='cn-zh'` 适配中文搜索。若网络不通可换 SerpAPI/Bocha 等。
 
-**Q: 模型调用报错？**
-A: 检查 `.env` 中 `LLM_PROVIDER` 与 Key 是否正确；网络受限时改用 `LLM_PROVIDER=offline`。
+**Q: 如何加更多能力？**
+A: 在 `tools.py` 里用 `@tool` 新增一个函数，然后在 `graph.py` 的 `tools=[...]` 里注册即可。
 
-## 后续扩展方向
+## 后续扩展
 
-- [ ] embedding 向量检索（FAISS / Chroma / 开源 BGE 模型）
-- [ ] 多轮对话记忆（LangGraph checkpointer）
+- [ ] 多轮对话记忆（checkpointer）
 - [ ] 流式输出（SSE）
-- [ ] 多文档引用标注与溯源
-- [ ] 知识库增量更新（watchdog 监控 docs 目录）
-- [ ] 接入 MCP 工具，扩展 Agent 能力
+- [ ] 更多工具：日历、邮件、数据库查询
+- [ ] 接入 MCP 生态
+- [ ] 检索升级为 embedding 向量库
 
 ## License
 
