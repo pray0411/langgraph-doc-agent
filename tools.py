@@ -71,9 +71,10 @@ def search_documents(query: str) -> str:
         return f"文档检索失败: {exc}"
     if not hits:
         return "没有在文档知识库中找到相关内容。"
-    parts = []
-    for h in hits:
-        parts.append(f"【来源: {h['source']} | 相关度: {h['score']:.3f}】\n{h['chunk']}")
+    # 带编号的来源列表，指示模型回答时引用来源编号
+    parts = ["以下为检索到的文档片段（回答时请用 [1][2]... 标注来源）："]
+    for i, h in enumerate(hits, 1):
+        parts.append(f"[{i}] 来源: {h['source']} | 相关度: {h['score']:.3f}\n{h['chunk']}")
     return "\n\n".join(parts)
 
 
@@ -102,12 +103,12 @@ def web_search(query: str) -> str:
     if not results:
         detail = "；".join(errors) if errors else "无结果"
         return f"没有搜索到相关信息。（{detail}）"
-    parts = []
+    parts = ["以下为搜索到的网页结果（回答时请引用对应编号的链接作为来源）："]
     for i, r in enumerate(results, 1):
         title = r.get("title", "")
         body = r.get("body", "")
         href = r.get("href", "")
-        parts.append(f"{i}. {title}\n   {body}\n   链接: {href}")
+        parts.append(f"[{i}] {title}\n   摘要: {body}\n   链接: {href}")
     return "\n".join(parts)
 
 
