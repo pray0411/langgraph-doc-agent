@@ -118,6 +118,7 @@ def ask(
 
     # 提取过程日志
     log = []
+    tool_calls = []
     for m in messages:
         role = m.get("role", "") if isinstance(m, dict) else getattr(m, "type", "")
         content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
@@ -125,10 +126,47 @@ def ask(
             log.append(f"[模型] {str(content)[:120]}")
         elif role == "tool":
             log.append(f"[工具调用] {str(content)[:120]}")
+            tool_calls.append(str(content))
 
-    reflection = result.get("reflection", "")
+    # 反思记录：基于实际执行过程生成
+    reflection = _build_reflection(question, answer, tool_calls, mode or LLM_PROVIDER)
 
     if show_log:
         for line in log:
             print(line)
     return answer, {"answer": answer, "messages": log, "reflection": reflection}
+
+
+def _build_reflection(question: str, answer: str, tool_calls: list[str], mode: str) -> str:
+    """生成反思记录：检查回答是否基于检索/搜索内容（grounded）。
+
+    统计本次问答实际调用了哪些工具、回答是否与工具结果相关，
+    输出结构化的反思 JSON，供前端展示与后续优化。
+    """
+    import json as _json
+
+    used_doc_search = any("来源" in c or "文档" in c for c in tool_calls)
+    used_web_search = any("链接" in c for c in tool_calls)
+    used_weather = any("°C" in c or "天气" in c for c in tool_calls)
+
+    # grounded 检查：回答是否包含工具返回的关键内容
+    grounded = False
+    for c in tool_calls:
+        # 取工具结果中的关键片段（去掉链接等噪声），看是否出现在回答里
+        sample = c[:200].replace("\n", " ")
+        if len(sample) > 20 and any(word in answer for word in sample.split()[:8]):
+            grounded = True
+            break
+
+    reflection = {
+        "问题": question,
+        "运行模式": mode,
+        "工具调用数": len(tool_calls),
+        "使用文档检索": used_doc_search,
+        "使用联网搜索": used_web_search,
+        "使用天气查询": used_weather,
+        "回答是否基于工具结果": grounded,
+        "回答长度": len(answer),
+        "说明": "基于实际执行过程的自动反思（ReAct 循环内模型自主决策）",
+    }
+    return _json.dumps(reflection, ensure_ascii=False, indent=2)
