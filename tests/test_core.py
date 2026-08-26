@@ -120,3 +120,33 @@ def test_graph_v1_is_valid_python():
 
     src = Path("graph_v1.py").read_text(encoding="utf-8")
     ast.parse(src)  # 不应抛异常
+
+
+# ---------- 规则引擎（离线内置回答） ----------
+
+def test_rule_engine_math():
+    """规则引擎应能计算数学问题。"""
+    from rule_engine import try_rule_answer
+
+    assert try_rule_answer("1+1等于几") == "1+1 = 2"
+    assert try_rule_answer("3*4-2等于多少") == "3*4-2 = 10"
+    assert try_rule_answer("10除以2等于几") == "10/2 = 5"
+    assert try_rule_answer("2乘5加3") == "2*5+3 = 13"
+
+
+def test_rule_engine_time_greeting():
+    """规则引擎应能回答时间/问候。"""
+    from rule_engine import try_rule_answer
+
+    assert try_rule_answer("现在几点") is not None
+    assert try_rule_answer("今天几号") is not None
+    assert "你好" in try_rule_answer("你好")
+    assert try_rule_answer("谢谢") is not None
+
+
+def test_rule_engine_unknown_returns_none():
+    """无法回答的问题应返回 None（交给检索）。"""
+    from rule_engine import try_rule_answer
+
+    assert try_rule_answer("量子物理和弦理论的区别") is None
+    assert try_rule_answer("什么是不确定性原理") is None

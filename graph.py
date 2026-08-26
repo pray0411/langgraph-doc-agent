@@ -29,15 +29,12 @@ class AgentResult(TypedDict, total=False):
 
 
 class _OfflineTools:
-    """离线模式：不调用模型/网络，用本地检索给出可运行的演示结果。
+    """离线模式：不调用模型/网络，用本地检索 + 内置规则回答。
 
-    定位：演示 RAG 检索链路（文档检索 -> 返回片段），而非模拟完整对话。
-    与 ReAct Agent 保持一致的 invoke(messages) 接口。
-
-    行为：
+    定位：零依赖可运行的演示模式。
+    - 简单问题（数学/时间/问候/身份）-> 内置规则引擎直接回答
     - 文档相关问题 -> 返回检索结果片段（含相似度）
-    - 检索不到 -> 提示换一种与文档相关的问法
-    - 明显闲聊/非文档问题 -> 说明离线模式的能力边界
+    - 其他 -> 提示离线能力边界，引导切换模式
     """
 
     def invoke(self, state: dict) -> dict:
@@ -47,6 +44,15 @@ class _OfflineTools:
                 question = m.get("content", "")
                 break
 
+        # 1. 先用内置规则引擎回答简单问题（数学/时间/问候等，无需模型）
+        from rule_engine import try_rule_answer
+
+        rule_answer = try_rule_answer(question)
+        if rule_answer:
+            answer = f"[离线演示] {rule_answer}"
+            return {"messages": [{"role": "assistant", "content": answer}]}
+
+        # 2. 规则答不了，尝试文档检索
         from config import TOP_K
         from retriever import search as _search
 
@@ -62,15 +68,14 @@ class _OfflineTools:
                 parts.append(f"\n[{i}] 来源: {h['source']}\n{h['chunk'][:400]}")
             answer = "\n".join(parts)
         else:
-            # 无检索结果：区分原因，给出更有用的提示
+            # 无检索结果：说明离线能力边界
             answer = (
-                "[离线演示] 离线模式只能在本地文档知识库中检索相关内容。\n"
-                "当前问题在文档中未检索到匹配内容，请尝试：\n"
-                "1. 问与项目文档相关的问题（如：这个项目用什么技术栈？）\n"
-                "2. 或切换到在线模式（页面顶部按钮）获得完整能力（对话/天气/联网搜索）"
+                "[离线演示] 离线模式可以回答：\n"
+                "1. 简单问题：数学计算、时间日期、问候\n"
+                "2. 文档相关问题：如'这个项目用什么技术栈？'\n"
+                "当前问题不在上述范围，请换一种问法，或切换到在线模式获得完整能力。"
             )
         return {"messages": [{"role": "assistant", "content": answer}]}
-
 
 def build_agent(mode: str | None = None):
     """构建通用 Agent。离线模式返回本地检索实现，在线模式用 ReAct Agent。
