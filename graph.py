@@ -39,6 +39,21 @@ def route_query(state: AgentState) -> AgentState:
     return {"intent": intent, "messages": [f"[路由] 识别意图: {intent}"]}
 
 
+def general_chat(state: AgentState) -> AgentState:
+    """通用对话节点：非文档问题直接调用模型回答（不经过检索）。"""
+    question = state["question"]
+    system = "你是一个友好的 AI 助手。回答使用中文，简洁准确。"
+    prompt = f"问题：{question}\n\n请回答："
+    llm = build_llm()
+    try:
+        answer = llm.generate(prompt, system=system)
+    except Exception as exc:  # noqa: BLE001
+        answer = f"（模型暂不可用，请稍后再试。错误：{exc}）"
+    state["answer"] = answer
+    state["messages"] = state.get("messages", []) + [f"[通用对话] 回答完成（{len(answer)} 字）"]
+    return state
+
+
 def retrieve(state: AgentState) -> AgentState:
     """工具调用节点：从文档索引检索相关内容。"""
     hits = search(state["question"], top_k=3)
@@ -107,10 +122,15 @@ def _contains_any(answer: str, chunk: str) -> bool:
     return sum(1 for w in words if w in answer) >= 2
 
 
-def should_continue(state: AgentState) -> Literal["generate", "retrieve", "end"]:
-    """条件边：按意图与确认状态决定流向。"""
+def should_continue(state: AgentState) -> Literal["retrieve", "general_chat"]:
+    """路由后的条件边：文档相关 -> 检索；通用问题 -> 通用对话。"""
     if state["intent"] == "general":
-        return "end"
+        return "general_chat"
+    return "retrieve"
+
+
+def should_continue_after_review(state: AgentState) -> Literal["generate", "end"]:
+    """人工确认后的条件边：确认通过 -> 生成；拒绝 -> 结束。"""
     if not state.get("confirmed", True):
         return "end"
     return "generate"
@@ -125,11 +145,13 @@ def build_graph():
     g.add_node("human", human_review)
     g.add_node("generate", generate)
     g.add_node("reflect", reflect)
+    g.add_node("general", general_chat)
 
     g.add_edge(START, "route")
-    g.add_conditional_edges("route", should_continue, {"generate": "generate", "retrieve": "retrieve", "end": END})
+    g.add_conditional_edges("route", should_continue, {"retrieve": "retrieve", "general_chat": "general"})
+    g.add_edge("general", END)
     g.add_edge("retrieve", "human")
-    g.add_conditional_edges("human", should_continue, {"generate": "generate", "end": END})
+    g.add_conditional_edges("human", should_continue_after_review, {"generate": "generate", "end": END})
     g.add_edge("generate", "reflect")
     g.add_edge("reflect", END)
     return g.compile()
