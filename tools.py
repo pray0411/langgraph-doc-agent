@@ -6,7 +6,56 @@
 """
 from langchain_core.tools import tool
 
+from config import BOCHA_API_KEY
 from retriever import search as _search_docs
+
+
+def _bocha_search(query: str, max_results: int = 5) -> list[dict]:
+    """博查搜索（国内，中文质量高，Agent 专用）。"""
+    import json as _json
+    import urllib.request
+
+    payload = _json.dumps(
+        {"query": query, "freshness": "noLimit", "summary": True, "count": max_results}
+    ).encode()
+    req = urllib.request.Request(
+        "https://api.bochaai.com/v1/web-search",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {BOCHA_API_KEY}",
+            "Content-Type": "application/json",
+        },
+    )
+    resp = urllib.request.urlopen(req, timeout=15)
+    data = _json.loads(resp.read().decode("utf-8"))
+    # 博查响应结构: {code, data: {webPages: {value: [...]}}}
+    values = data.get("data", {}).get("webPages", {}).get("value", []) or []
+    results = []
+    for v in values:
+        results.append(
+            {
+                "title": v.get("name", ""),
+                "body": v.get("summary") or v.get("snippet", ""),
+                "href": v.get("url", ""),
+            }
+        )
+    return results
+
+def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
+    """DuckDuckGo 搜索（英文较好，中文一般）。"""
+    from duckduckgo_search import DDGS
+
+    with DDGS(timeout=10) as ddgs:
+        raw = list(ddgs.text(query, region="cn-zh", max_results=max_results))
+    if not raw:
+        with DDGS(timeout=10) as ddgs:
+            raw = list(ddgs.text(query, max_results=max_results))
+    results = []
+    for r in raw:
+        results.append(
+            {"title": r.get("title", ""), "body": r.get("body", ""), "href": r.get("href", "")}
+        )
+    return results
 
 
 @tool
@@ -33,17 +82,26 @@ def web_search(query: str) -> str:
     """联网搜索实时信息（天气、新闻、最新事件、事实查询等）。
 
     当用户问题需要当前时间/实时数据/最新信息，或本地文档无法回答时调用。
-    返回搜索结果的标题与摘要。
+    返回搜索结果的标题与摘要。自动选择搜索引擎：配置了 Bocha 博查 API Key
+    时优先用博查（中文搜索质量高），否则退回 DuckDuckGo。
     """
-    try:
-        from duckduckgo_search import DDGS
-
-        with DDGS(timeout=10) as ddgs:
-            results = list(ddgs.text(query, region="cn-zh", max_results=5))
-    except Exception as exc:  # noqa: BLE001
-        return f"联网搜索失败: {exc}（可稍后重试或换个问法）"
+    results = []
+    errors = []
+    # 引擎1: 博查（配置了 Key 才用）
+    if BOCHA_API_KEY:
+        try:
+            results = _bocha_search(query)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"博查: {exc}")
+    # 引擎2: DuckDuckGo（博查失败或无 Key 时兜底）
     if not results:
-        return "没有搜索到相关信息。"
+        try:
+            results = _ddg_search(query)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"DuckDuckGo: {exc}")
+    if not results:
+        detail = "；".join(errors) if errors else "无结果"
+        return f"没有搜索到相关信息。（{detail}）"
     parts = []
     for i, r in enumerate(results, 1):
         title = r.get("title", "")

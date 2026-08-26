@@ -21,6 +21,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")  # 可选，自定义 OpenAI 兼容地址
 
+# 联网搜索（双引擎：配了 Bocha 用博查中文搜索，否则退回 DuckDuckGo）
+BOCHA_API_KEY = os.getenv("BOCHA_API_KEY", "")
+
 # 检索
 EMBEDDING_MODE = os.getenv("EMBEDDING_MODE", "local")  # local / remote
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
