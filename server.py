@@ -1,8 +1,10 @@
 """网页问答服务：使用 Python 标准库 http.server，零第三方依赖。
 
-GET  /        -> 问答页面
-GET  /health  -> 健康检查
-POST /ask     -> {question} 返回 {answer, log, reflection}
+GET  /             -> 问答页面
+GET  /health       -> 健康检查
+GET  /api/mode     -> 获取当前运行模式
+POST /api/mode     -> 切换运行模式（deepseek/openai/offline，无需重启）
+POST /ask          -> {question} 返回 {answer, log, reflection}
 
 加固措施：
 - 请求体大小限制（MAX_BODY，防止超大请求）
@@ -24,6 +26,27 @@ MAX_BODY = 10 * 1024
 # 单请求超时：60 秒（模型调用 + 工具调用可能较慢）
 REQUEST_TIMEOUT = 60
 
+# 有效模式
+VALID_MODES = ("deepseek", "openai", "offline")
+
+# 当前运行模式（默认读取 .env 的 LLM_PROVIDER，可通过 /api/mode 动态切换）
+_current_mode = None
+
+
+def get_mode():
+    """获取当前模式，首次调用时从 config 读取默认值。"""
+    global _current_mode
+    if _current_mode is None:
+        from config import LLM_PROVIDER
+        _current_mode = LLM_PROVIDER
+    return _current_mode
+
+
+def set_mode(mode: str):
+    """设置当前模式（deepseek / openai / offline）。"""
+    global _current_mode
+    _current_mode = mode
+
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
@@ -35,14 +58,35 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(html.encode("utf-8"))
         elif self.path == "/health":
             self._json({"status": "ok"})
+        elif self.path == "/api/mode":
+            self._json({"mode": get_mode()})
         else:
             self.send_error(404)
 
     def do_POST(self):  # noqa: N802
-        if self.path != "/ask":
-            self.send_error(404)
+        if self.path == "/api/mode":
+            self._handle_set_mode()
             return
+        if self.path == "/ask":
+            self._handle_ask()
+            return
+        self.send_error(404)
 
+    def _handle_set_mode(self):
+        length = int(self.headers.get("Content-Length", 0))
+        if length > MAX_BODY:
+            self._json({"error": "请求体过大"}, 413)
+            return
+        body = self.rfile.read(length).decode("utf-8", errors="replace")
+        data = parse_qs(body)
+        mode = (data.get("mode") or [""])[0].strip().lower()
+        if mode not in VALID_MODES:
+            self._json({"error": f"无效模式: {mode}，可选 {'/'.join(VALID_MODES)}"}, 400)
+            return
+        set_mode(mode)
+        self._json({"mode": get_mode(), "message": f"已切换到 {mode} 模式"})
+
+    def _handle_ask(self):
         # 请求体大小限制
         length = int(self.headers.get("Content-Length", 0))
         if length > MAX_BODY:
@@ -62,7 +106,8 @@ class Handler(BaseHTTPRequestHandler):
 
         def _run():
             try:
-                answer, result = ask(question)
+                # 使用当前动态模式（运行时切换，无需重启服务）
+                answer, result = ask(question, mode=get_mode())
                 result_box["ok"] = (answer, result)
             except Exception:  # noqa: BLE001
                 result_box["error"] = True

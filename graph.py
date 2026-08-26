@@ -60,9 +60,13 @@ class _OfflineTools:
         return {"messages": [{"role": "assistant", "content": answer}]}
 
 
-def build_agent():
-    """构建通用 Agent。离线模式返回本地检索实现，在线模式用 ReAct Agent。"""
-    provider = LLM_PROVIDER.lower()
+def build_agent(mode: str | None = None):
+    """构建通用 Agent。离线模式返回本地检索实现，在线模式用 ReAct Agent。
+
+    mode: 可选，显式指定模式（deepseek/openai/offline）；不传则用配置默认值。
+    支持运行时动态切换（如网页端按钮切换）。
+    """
+    provider = (mode or LLM_PROVIDER).lower()
     if provider == "offline":
         return _OfflineTools()
 
@@ -77,13 +81,19 @@ def build_agent():
     return create_react_agent(model=model, tools=[search_documents, web_search, get_weather])
 
 
-def ask(question: str, confirmed: bool = True, show_log: bool = False) -> tuple[str, AgentResult]:
+def ask(
+    question: str,
+    confirmed: bool = True,
+    show_log: bool = False,
+    mode: str | None = None,
+) -> tuple[str, AgentResult]:
     """对外问答入口：执行一次 Agent 推理，返回 (回答, 结果详情)。
 
     confirmed: 保留的兼容参数。V2 的 ReAct 循环中，模型自主决定是否继续，
     不再有独立的人工确认节点。
+    mode: 可选，动态指定运行模式（deepseek/openai/offline），不传用配置默认。
     """
-    agent = build_agent()
+    agent = build_agent(mode)
     result = agent.invoke({"messages": [{"role": "user", "content": question}]})
     messages = result.get("messages", [])
     if not messages:

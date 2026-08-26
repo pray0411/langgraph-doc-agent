@@ -27,27 +27,40 @@
   .loading { color: #4f46e5; font-size: 14px; }
   .error { color: #dc2626; }
   .hint { font-size: 12px; color: #bbb; text-align: center; margin-top: 20px; }
+  .mode-bar { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 14px 0 4px; font-size: 13px; color: #666; }
+  .mode-btn { padding: 8px 18px; border: 2px solid #4f46e5; background: #fff; color: #4f46e5; border-radius: 20px; font-size: 13px; cursor: pointer; transition: all .2s; }
+  .mode-btn:hover { background: #eef2ff; }
+  .mode-btn.active { background: #4f46e5; color: #fff; }
+  .mode-status { font-size: 12px; color: #999; }
 </style>
 </head>
 <body>
 <div class="container">
   <header>
-    <h1>LangGraph 智能文档问答 Agent <span class="badge">StateGraph + RAG</span></h1>
-    <p>路由 → 检索 → 人工确认 → 生成 → 反思</p>
+    <h1>LangGraph 智能文档问答 Agent <span class="badge">ReAct + RAG</span></h1>
+    <p>文档问答 · 实时天气 · 联网搜索 · 普通对话</p>
   </header>
+
+  <div class="mode-bar">
+    <span>运行模式：</span>
+    <button class="mode-btn" data-mode="deepseek">在线 (DeepSeek)</button>
+    <button class="mode-btn" data-mode="offline">离线 (本地检索)</button>
+    <span class="mode-status" id="modeStatus"></span>
+  </div>
 
   <div class="input-area">
     <input id="question" placeholder="输入问题，例如：这个项目的核心架构是什么？" autocomplete="off">
     <button id="askBtn">提问</button>
   </div>
-  <div class="meta">示例：项目的核心功能 / 用什么框架 / 如何部署</div>
+  <div class="meta">示例：项目的核心功能 / 用什么框架 / 如何部署 / 今天天气 / 最近AI新闻</div>
 
   <div id="result">
     <div class="card"><h3>回答</h3><div id="answer" class="loading">等待提问…</div></div>
-    <div class="card"><h3>推理过程（LangGraph 节点执行日志）</h3><ul id="log"></ul></div>
+    <div class="card"><h3>推理过程（Agent 执行日志）</h3><ul id="log"></ul></div>
     <div class="card"><h3>反思记录</h3><div id="reflection">—</div></div>
   </div>
-  <div class="hint">Powered by LangGraph · 本地 TF-IDF 检索 · 可切换 DeepSeek / OpenAI / 离线模式</div>
+  <div class="hint">Powered by LangGraph · 双引擎搜索（博查 + DuckDuckGo）· 点击上方按钮切换在线/离线模式</div>
+</div>
 </div>
 
 <script>
@@ -56,10 +69,51 @@ const btn = document.getElementById('askBtn');
 const answerEl = document.getElementById('answer');
 const logEl = document.getElementById('log');
 const refEl = document.getElementById('reflection');
+const modeBtns = document.querySelectorAll('.mode-btn');
+const modeStatus = document.getElementById('modeStatus');
+let currentMode = 'deepseek';
+
+// 加载当前模式
+async function loadMode() {
+  try {
+    const resp = await fetch('/api/mode');
+    const data = await resp.json();
+    setModeUI(data.mode);
+  } catch (e) { /* 服务未就绪时保持默认 */ }
+}
+
+// 切换模式
+async function switchMode(mode) {
+  const resp = await fetch('/api/mode', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'mode=' + encodeURIComponent(mode)
+  });
+  const data = await resp.json();
+  if (data.error) { alert('切换失败: ' + data.error); return; }
+  setModeUI(data.mode);
+  answerEl.className = 'loading';
+  answerEl.textContent = '已切换到 ' + (data.mode === 'offline' ? '离线模式（不联网，仅本地文档检索）' : '在线模式（DeepSeek）') + '，可以提问了';
+}
+
+function setModeUI(mode) {
+  currentMode = mode;
+  modeBtns.forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === mode);
+  });
+  modeStatus.textContent = mode === 'offline'
+    ? '当前：离线模式（免费，仅本地检索）'
+    : '当前：在线模式（DeepSeek，完整能力）';
+}
+
+// 绑定模式按钮
+modeBtns.forEach(b => {
+  b.addEventListener('click', () => switchMode(b.dataset.mode));
+});
 
 btn.addEventListener('click', ask);
 input.addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
-
+loadMode();
 async function ask() {
   const question = input.value.trim();
   if (!question) return;
