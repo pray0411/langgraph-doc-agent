@@ -6,7 +6,7 @@
 """
 from langchain_core.tools import tool
 
-from config import BOCHA_API_KEY
+from config import BOCHA_API_KEY, TOP_K
 from retriever import search as _search_docs
 
 
@@ -66,7 +66,7 @@ def search_documents(query: str) -> str:
     返回检索到的文档片段（含来源），按相关度从高到低排列。
     """
     try:
-        hits = _search_docs(query, top_k=3)
+        hits = _search_docs(query, top_k=TOP_K)
     except Exception as exc:  # noqa: BLE001
         return f"文档检索失败: {exc}"
     if not hits:

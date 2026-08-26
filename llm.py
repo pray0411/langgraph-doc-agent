@@ -9,6 +9,8 @@ from config import DEEPSEEK_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_PROVIDER, OPEN
 
 class LLMError(RuntimeError):
     pass
+
+
 class _OfflineLLM:
     """离线演示模型：不调用外部 API。
 
@@ -23,9 +25,6 @@ class _OfflineLLM:
             content = content.split("\n\n问题：", 1)[0]
             return f"[离线演示] 以下为基于文档检索的原始内容：\n\n{content.strip()}"
         return "[离线演示] 未检索到文档内容，请先构建索引。"
-
-    def generate(self, prompt: str, system: str = "") -> str:
-        return prompt
 
 
 class _OpenAICompatLLM:

@@ -41,6 +41,10 @@ python -X utf8 main.py web
 > 改了 `tools.py` / `graph.py` 等代码后，必须停止旧服务（Ctrl+C 或结束进程）
 > 再重新 `python -X utf8 main.py web` 启动，新代码才生效。
 
+> 💡 **离线模式**：不配置任何 API Key（`LLM_PROVIDER=offline`）时，Agent 会用
+> 本地文档检索给出演示回答，适合无 Key 环境验证链路；配置 DeepSeek/OpenAI
+> Key 后获得完整能力（联网搜索、天气、智能对话）。
+
 ## 架构：ReAct 模式
 
 ```

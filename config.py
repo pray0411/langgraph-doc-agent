@@ -25,9 +25,9 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")  # 可选，自定义 OpenAI 兼容
 BOCHA_API_KEY = os.getenv("BOCHA_API_KEY", "")
 
 # 检索
-EMBEDDING_MODE = os.getenv("EMBEDDING_MODE", "local")  # local / remote
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 TOP_K = int(os.getenv("TOP_K", "3"))
+MIN_SCORE = float(os.getenv("MIN_SCORE", "0.05"))  # 检索最低相似度阈值
 
 INDEX_FILE = INDEX_DIR / "index.json"

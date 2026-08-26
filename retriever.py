@@ -152,8 +152,16 @@ def load_index() -> list[dict]:
 
 # ---------- 检索 ----------
 
-def search(query: str, top_k: int = 3) -> list[dict]:
-    """对查询做 TF-IDF 向量化并与索引中所有 chunk 计算相似度，返回 top_k。"""
+# 最低相似度阈值：低于该值的片段视为"与问题无关"，不返回（避免硬塞无关上下文）
+MIN_SCORE = 0.05
+
+
+def search(query: str, top_k: int = 3, min_score: float = MIN_SCORE) -> list[dict]:
+    """对查询做 TF-IDF 向量化并与索引中所有 chunk 计算相似度。
+
+    - 只返回相似度 >= min_score 的片段（低于阈值视为无关，拒答）
+    - 返回按相似度降序的 top_k 个
+    """
     records = load_index()
     q_vec = _compute_tfidf([query])[0]
     scored = [
@@ -161,4 +169,6 @@ def search(query: str, top_k: int = 3) -> list[dict]:
         for r in records
     ]
     scored.sort(key=lambda x: x["score"], reverse=True)
-    return scored[:top_k]
+    # 阈值过滤：低于最低相似度的结果丢弃
+    filtered = [s for s in scored if s["score"] >= min_score]
+    return filtered[:top_k]
