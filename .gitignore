@@ -15,3 +15,6 @@ index/
 # 临时凭据文件（禁止提交）
 _token.txt
 _device_code.txt
+
+# 个人面试准备材料（仅本地参考，禁止提交）
+resume-materials.md
