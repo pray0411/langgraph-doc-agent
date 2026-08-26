@@ -19,7 +19,25 @@
 # 1. 安装依赖
 pip install -r requirements.txt
 
-# 2. 把要问答的文档放进 docs/ 目录（支持 .md/.txt/.py 等），然后构建索引
+## 配置模型（可选）
+
+默认**离线模式**，无需任何 API Key 即可完整演示。想接真实大模型，复制 `.env.example` 为 `.env` 并填写：
+
+```ini
+# DeepSeek（国内直连，推荐练手）
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=sk-xxxx
+LLM_MODEL=deepseek-chat
+
+# 或 OpenAI
+# LLM_PROVIDER=openai
+# OPENAI_API_KEY=sk-xxxx
+
+# 或离线演示
+# LLM_PROVIDER=offline
+```
+
+> ⚠️ `.env` 已加入 `.gitignore`，API Key 不会进入版本库。
 python main.py build
 
 # 3a. 命令行提问
