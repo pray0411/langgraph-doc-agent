@@ -6,55 +6,83 @@
 <title>AI Agent</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background: #fff; color: #1f2328; height: 100vh; overflow: hidden; }
-  .app { display: flex; flex-direction: column; height: 100vh; max-width: 900px; margin: 0 auto; }
-  header { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid #e8e8e8; background: #fff; }
-  .logo { font-size: 16px; font-weight: 700; color: #1f2328; display: flex; align-items: center; gap: 8px; }
-  .logo span { color: #4f46e5; }
-  .header-actions { display: flex; align-items: center; gap: 10px; }
-  #modeSelect { padding: 6px 10px; border: 1px solid #e0e0e0; border-radius: 8px; font-size: 13px; background: #fff; cursor: pointer; outline: none; }
-  .header-btn { padding: 6px 12px; border: 1px solid #e0e0e0; border-radius: 8px; background: #fff; color: #57606a; font-size: 13px; cursor: pointer; }
-  .header-btn:hover { border-color: #4f46e5; color: #4f46e5; }
-  #chatArea { flex: 1; overflow-y: auto; padding: 24px 20px; display: flex; flex-direction: column; gap: 16px; }
-  .msg { display: flex; gap: 12px; max-width: 100%; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: #ffffff; color: #1f2328; height: 100vh; overflow: hidden; }
+
+  .app { display: flex; flex-direction: column; height: 100vh; }
+
+  /* 顶部导航 */
+  header { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; border-bottom: 1px solid #ececf1; background: #fff; }
+  .logo { font-size: 17px; font-weight: 700; color: #1f2328; display: flex; align-items: center; gap: 8px; }
+  .logo-icon { width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, #10a37f, #19c37d); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 15px; }
+  .header-right { display: flex; align-items: center; gap: 8px; }
+  #modeSelect { padding: 6px 10px; border: 1px solid #e0e0e0; border-radius: 8px; font-size: 13px; background: #fff; cursor: pointer; outline: none; color: #444; }
+  .h-btn { padding: 6px 12px; border: 1px solid #e0e0e0; border-radius: 8px; background: #fff; color: #555; font-size: 13px; cursor: pointer; transition: all .15s; }
+  .h-btn:hover { border-color: #10a37f; color: #10a37f; }
+
+  /* 聊天区 */
+  #chatArea { flex: 1; overflow-y: auto; }
+  .chat-inner { max-width: 800px; margin: 0 auto; padding: 24px 24px 40px; display: flex; flex-direction: column; gap: 24px; }
+
+  /* 欢迎屏 */
+  .welcome { text-align: center; padding: 60px 20px 20px; }
+  .welcome-icon { width: 64px; height: 64px; margin: 0 auto 20px; border-radius: 16px; background: linear-gradient(135deg, #10a37f, #19c37d); display: flex; align-items: center; justify-content: center; font-size: 30px; color: #fff; box-shadow: 0 8px 24px rgba(16,163,127,.25); }
+  .welcome h2 { font-size: 22px; color: #1f2328; margin-bottom: 10px; font-weight: 700; }
+  .welcome p { color: #8e8ea0; font-size: 14px; line-height: 1.8; }
+  .welcome-suggestions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 28px; }
+  .suggestion { padding: 10px 18px; border: 1px solid #ececf1; border-radius: 12px; background: #fff; color: #444; font-size: 13px; cursor: pointer; transition: all .15s; }
+  .suggestion:hover { border-color: #10a37f; color: #10a37f; background: #f9fdfb; }
+
+  /* 消息 */
+  .msg { display: flex; gap: 14px; animation: fadeIn .25s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
   .msg.user { flex-direction: row-reverse; }
-  .avatar { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
-  .msg.user .avatar { background: linear-gradient(135deg, #4f46e5, #7c3aed); color: #fff; }
-  .msg.assistant .avatar { background: #f0f0f0; color: #57606a; }
-  .bubble { padding: 12px 16px; border-radius: 12px; font-size: 14px; line-height: 1.7; max-width: 78%; white-space: pre-wrap; word-break: break-word; }
-  .msg.user .bubble { background: #4f46e5; color: #fff; border-top-right-radius: 4px; }
-  .msg.assistant .bubble { background: #f6f8fa; color: #1f2328; border-top-left-radius: 4px; }
+  .avatar { width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
+  .msg.assistant .avatar { background: linear-gradient(135deg, #10a37f, #19c37d); color: #fff; }
+  .msg.user .avatar { background: #f0f0f4; color: #666; border: 1px solid #e4e4ea; }
+  .msg-body { display: flex; flex-direction: column; gap: 4px; max-width: 82%; }
+  .msg.user .msg-body { align-items: flex-end; }
+  .msg-name { font-size: 12px; color: #9a9aa8; padding: 0 4px; }
+  .bubble { padding: 12px 18px; border-radius: 16px; font-size: 14.5px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+  .msg.assistant .bubble { background: #f7f7f9; color: #1f2328; border-top-left-radius: 4px; }
+  .msg.user .bubble { background: #10a37f; color: #fff; border-top-right-radius: 4px; }
   .bubble.error { background: #fef2f2; color: #dc2626; }
-  .typing { color: #999; font-size: 13px; }
-  .typing::after { content: '…'; animation: dots 1.2s infinite; }
-  @keyframes dots { 0%, 20% { content: ''; } 40% { content: '.'; } 60% { content: '..'; } 80%, 100% { content: '...'; } }
-  .input-area { border-top: 1px solid #e8e8e8; padding: 12px 20px 16px; display: flex; gap: 10px; background: #fff; }
-  #question { flex: 1; padding: 12px 16px; border: 1px solid #e0e0e0; border-radius: 10px; font-size: 14px; outline: none; resize: none; }
-  #question:focus { border-color: #4f46e5; }
-  #askBtn { padding: 12px 24px; background: #4f46e5; color: #fff; border: none; border-radius: 10px; font-size: 14px; cursor: pointer; }
-  #askBtn:hover { background: #4338ca; }
-  #askBtn:disabled { opacity: .5; cursor: not-allowed; }
-  .empty-hint { text-align: center; color: #b0b7c6; margin-top: 60px; font-size: 14px; }
-  .empty-hint .big { font-size: 40px; margin-bottom: 12px; }
+  .typing-bubble { display: inline-flex; align-items: center; gap: 4px; padding: 14px 18px; background: #f7f7f9; border-radius: 16px; border-top-left-radius: 4px; }
+  .typing-bubble span { width: 7px; height: 7px; border-radius: 50%; background: #b0b0bc; animation: bounce 1.2s infinite; }
+  .typing-bubble span:nth-child(2) { animation-delay: .2s; }
+  .typing-bubble span:nth-child(3) { animation-delay: .4s; }
+  @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-5px); } }
+
+  /* 输入区 */
+  .input-area { border-top: 1px solid #ececf1; padding: 16px 24px 20px; background: #fff; }
+  .input-box { max-width: 800px; margin: 0 auto; display: flex; gap: 10px; align-items: flex-end; border: 1px solid #e0e0e0; border-radius: 14px; padding: 8px 8px 8px 16px; background: #fff; transition: border-color .2s, box-shadow .2s; }
+  .input-box:focus-within { border-color: #10a37f; box-shadow: 0 0 0 3px rgba(16,163,127,.12); }
+  #question { flex: 1; border: none; outline: none; font-size: 14.5px; padding: 8px 0; resize: none; max-height: 140px; font-family: inherit; color: #1f2328; background: transparent; }
+  #askBtn { width: 38px; height: 38px; border: none; border-radius: 10px; background: #10a37f; color: #fff; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; transition: background .15s; flex-shrink: 0; }
+  #askBtn:hover { background: #0e8f70; }
+  #askBtn:disabled { background: #b9b9c4; cursor: not-allowed; }
+  .input-hint { max-width: 800px; margin: 8px auto 0; font-size: 12px; color: #b0b0bc; text-align: center; }
 
   /* 换 Key 弹窗 */
   #settingsModal { display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,.4); z-index:100; align-items:center; justify-content:center; }
-  .modal-card { background:#fff; border-radius:12px; padding:24px; width:420px; max-width:90%; box-shadow:0 4px 20px rgba(0,0,0,.2); }
-  .modal-card h3 { margin-bottom:16px; color:#1a1a2e; font-size:16px; }
-  .modal-card label { font-size:13px; color:#666; display:block; margin-bottom:4px; }
-  .modal-card select, .modal-card input { width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; margin-bottom:12px; font-size:13px; }
+  .modal-card { background:#fff; border-radius:14px; padding:28px; width:420px; max-width:90%; box-shadow:0 8px 40px rgba(0,0,0,.15); }
+  .modal-card h3 { margin-bottom:20px; color:#1f2328; font-size:17px; font-weight:700; }
+  .modal-card label { font-size:13px; color:#666; display:block; margin-bottom:5px; }
+  .modal-card select, .modal-card input { width:100%; padding:9px 12px; border:1px solid #ddd; border-radius:9px; margin-bottom:14px; font-size:13px; outline:none; }
+  .modal-card select:focus, .modal-card input:focus { border-color:#10a37f; }
   .modal-card .row { text-align:right; }
-  .modal-card button { padding:8px 16px; border-radius:8px; cursor:pointer; font-size:13px; }
-  .btn-cancel { border:1px solid #ddd; background:#fff; margin-right:8px; }
-  .btn-save { border:none; background:#4f46e5; color:#fff; }
+  .modal-card button { padding:9px 18px; border-radius:9px; cursor:pointer; font-size:13px; font-weight:500; }
+  .btn-cancel { border:1px solid #ddd; background:#fff; color:#555; margin-right:8px; }
+  .btn-cancel:hover { border-color:#aaa; }
+  .btn-save { border:none; background:#10a37f; color:#fff; }
+  .btn-save:hover { background:#0e8f70; }
   #cfgMsg { margin-top:10px; font-size:13px; color:#dc2626; }
 </style>
 </head>
 <body>
 <div class="app">
   <header>
-    <div class="logo"><span>✦</span> AI Agent</div>
-    <div class="header-actions">
+    <div class="logo"><div class="logo-icon">✦</div> AI Agent</div>
+    <div class="header-right">
       <select id="modeSelect">
         <option value="deepseek">DeepSeek</option>
         <option value="openai">OpenAI</option>
@@ -64,29 +92,40 @@
         <option value="ollama">本地 · Ollama</option>
         <option value="offline">纯检索 · 免费</option>
       </select>
-      <button class="header-btn" id="clearBtn">清空</button>
-      <button class="header-btn" id="settingsBtn">⚙ Key</button>
+      <button class="h-btn" id="clearBtn">新对话</button>
+      <button class="h-btn" id="settingsBtn">Key 设置</button>
     </div>
   </header>
 
   <div id="chatArea">
-    <div class="empty-hint">
-      <div class="big">✦</div>
-      <div>我是 AI Agent，可以对话、查天气、搜新闻、读文档</div>
-      <div style="margin-top:6px; font-size:12px;">试试问我：今天北京天气 / 最近有什么AI新闻 / 这个项目的架构</div>
+    <div class="chat-inner" id="chatInner">
+      <div class="welcome" id="welcome">
+        <div class="welcome-icon">✦</div>
+        <h2>我能帮你做什么？</h2>
+        <p>文档问答 · 实时天气 · 联网搜索 · 普通对话</p>
+        <div class="welcome-suggestions">
+          <div class="suggestion" onclick="quickAsk('这个项目的核心架构是什么？')">项目架构</div>
+          <div class="suggestion" onclick="quickAsk('今天北京的天气怎么样？')">查天气</div>
+          <div class="suggestion" onclick="quickAsk('最近有什么AI新闻？')">AI 新闻</div>
+          <div class="suggestion" onclick="quickAsk('1+1等于几？')">算数</div>
+        </div>
+      </div>
     </div>
   </div>
 
   <div class="input-area">
-    <textarea id="question" rows="1" placeholder="输入消息… (Enter 发送)" style="max-height:120px;"></textarea>
-    <button id="askBtn">发送</button>
+    <div class="input-box">
+      <textarea id="question" rows="1" placeholder="发送消息…"></textarea>
+      <button id="askBtn" title="发送">➤</button>
+    </div>
+    <div class="input-hint">Enter 发送 · Shift + Enter 换行</div>
   </div>
 </div>
 
 <!-- 更换 API Key 弹窗 -->
 <div id="settingsModal">
   <div class="modal-card">
-    <h3>更换 API Key</h3>
+    <h3>API Key 设置</h3>
     <label>服务商</label>
     <select id="cfgProvider">
       <option value="deepseek">DeepSeek（deepseek-chat）</option>
@@ -112,6 +151,7 @@
 <script>
 const input = document.getElementById('question');
 const btn = document.getElementById('askBtn');
+const chatInner = document.getElementById('chatInner');
 const chatArea = document.getElementById('chatArea');
 const modeSelect = document.getElementById('modeSelect');
 const settingsBtn = document.getElementById('settingsBtn');
@@ -121,27 +161,34 @@ const cfgApiKey = document.getElementById('cfgApiKey');
 const cfgBaseUrl = document.getElementById('cfgBaseUrl');
 const cfgModel = document.getElementById('cfgModel');
 const cfgMsg = document.getElementById('cfgMsg');
-let currentMode = 'deepseek';
-let history = [];  // 多轮对话历史
+let history = [];
 
 // ---------- 消息渲染 ----------
+function scrollBottom() { chatArea.scrollTop = chatArea.scrollHeight; }
+
 function addMessage(role, content) {
-  // 移除空状态提示
-  const empty = chatArea.querySelector('.empty-hint');
-  if (empty) empty.remove();
+  const welcome = document.getElementById('welcome');
+  if (welcome) welcome.remove();
 
   const msg = document.createElement('div');
   msg.className = 'msg ' + role;
   const avatar = document.createElement('div');
   avatar.className = 'avatar';
-  avatar.textContent = role === 'user' ? '我' : 'AI';
+  avatar.textContent = role === 'user' ? '我' : '✦';
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+  const name = document.createElement('div');
+  name.className = 'msg-name';
+  name.textContent = role === 'user' ? '你' : 'AI Agent';
   const bubble = document.createElement('div');
-  bubble.className = 'bubble';
+  bubble.className = 'bubble' + (content.startsWith('⚠') || content.startsWith('请求失败') ? ' error' : '');
   bubble.textContent = content;
+  body.appendChild(name);
+  body.appendChild(bubble);
   msg.appendChild(avatar);
-  msg.appendChild(bubble);
-  chatArea.appendChild(msg);
-  chatArea.scrollTop = chatArea.scrollHeight;
+  msg.appendChild(body);
+  chatInner.appendChild(msg);
+  scrollBottom();
 }
 
 function addTyping() {
@@ -150,14 +197,21 @@ function addTyping() {
   msg.id = 'typingMsg';
   const avatar = document.createElement('div');
   avatar.className = 'avatar';
-  avatar.textContent = 'AI';
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble typing';
-  bubble.textContent = '思考中';
+  avatar.textContent = '✦';
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+  const name = document.createElement('div');
+  name.className = 'msg-name';
+  name.textContent = 'AI Agent';
+  const typing = document.createElement('div');
+  typing.className = 'typing-bubble';
+  typing.innerHTML = '<span></span><span></span><span></span>';
+  body.appendChild(name);
+  body.appendChild(typing);
   msg.appendChild(avatar);
-  msg.appendChild(bubble);
-  chatArea.appendChild(msg);
-  chatArea.scrollTop = chatArea.scrollHeight;
+  msg.appendChild(body);
+  chatInner.appendChild(msg);
+  scrollBottom();
 }
 
 function removeTyping() {
@@ -190,7 +244,6 @@ async function ask() {
       return;
     }
     addMessage('assistant', data.answer);
-    // 更新历史
     history.push({role: 'user', content: question});
     history.push({role: 'assistant', content: data.answer});
     if (history.length > 40) history = history.slice(-40);
@@ -202,7 +255,12 @@ async function ask() {
   }
 }
 
-// ---------- 输入框 ----------
+function quickAsk(q) {
+  input.value = q;
+  ask();
+}
+
+// ---------- 输入 ----------
 btn.addEventListener('click', ask);
 input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -210,16 +268,15 @@ input.addEventListener('keydown', e => {
     ask();
   }
 });
-// 自动增高
 input.addEventListener('input', () => {
   input.style.height = 'auto';
-  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  input.style.height = Math.min(input.scrollHeight, 140) + 'px';
 });
 
-// ---------- 清空对话 ----------
+// ---------- 新对话 ----------
 document.getElementById('clearBtn').addEventListener('click', () => {
   history = [];
-  chatArea.innerHTML = '<div class="empty-hint"><div class="big">✦</div><div>新对话已开始</div></div>';
+  chatInner.innerHTML = '<div class="welcome" id="welcome"><div class="welcome-icon">✦</div><h2>我能帮你做什么？</h2><p>文档问答 · 实时天气 · 联网搜索 · 普通对话</p><div class="welcome-suggestions"><div class="suggestion" onclick="quickAsk(\'这个项目的核心架构是什么？\')">项目架构</div><div class="suggestion" onclick="quickAsk(\'今天北京的天气怎么样？\')">查天气</div><div class="suggestion" onclick="quickAsk(\'最近有什么AI新闻？\')">AI 新闻</div><div class="suggestion" onclick="quickAsk(\'1+1等于几？\')">算数</div></div></div>';
 });
 
 // ---------- 模式 ----------
