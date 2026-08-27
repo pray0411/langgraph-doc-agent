@@ -168,7 +168,6 @@ function setModeUI(mode) {
 
 // 下拉选择切换模式
 modeSelect.addEventListener('change', () => switchMode(modeSelect.value));
-});
 
 btn.addEventListener('click', ask);
 input.addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
