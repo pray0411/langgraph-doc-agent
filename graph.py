@@ -101,8 +101,18 @@ def build_agent(mode: str | None = None):
 
     api_key = DEEPSEEK_API_KEY if provider == "deepseek" else None
     base_url = LLM_BASE_URL or ("https://api.deepseek.com/v1" if provider == "deepseek" else None)
+
+    # 优先使用运行时配置（网页端可动态更换 Key）
+    from config import get_provider_config
+    pcfg = get_provider_config(provider)
+    if pcfg.get("api_key"):
+        api_key = pcfg["api_key"]
+    if pcfg.get("base_url"):
+        base_url = pcfg["base_url"]
+    model_name = pcfg.get("model") or LLM_MODEL
+
     model = ChatOpenAI(
-        model=LLM_MODEL,
+        model=model_name,
         api_key=api_key,
         base_url=base_url,
         temperature=0.3,

@@ -88,22 +88,43 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/mode":
             self._handle_set_mode()
             return
+        if self.path == "/api/config":
+            self._handle_set_config()
+            return
         if self.path == "/ask":
             self._handle_ask()
-            return
-        self.send_error(404)
+        set_mode(mode)
+        self._json({"mode": get_mode(), "message": f"已切换到 {mode} 模式"})
 
-    def _handle_set_mode(self):
+    def _handle_set_config(self):
+        """网页端更换 API Key / 模型配置。"""
         length = int(self.headers.get("Content-Length", 0))
         if length > MAX_BODY:
             self._json({"error": "请求体过大"}, 413)
             return
         body = self.rfile.read(length).decode("utf-8", errors="replace")
         data = parse_qs(body)
-        mode = (data.get("mode") or [""])[0].strip().lower()
-        if mode not in VALID_MODES:
-            self._json({"error": f"无效模式: {mode}，可选 {'/'.join(VALID_MODES)}"}, 400)
+        provider = (data.get("provider") or [""])[0].strip().lower()
+        api_key = (data.get("api_key") or [""])[0].strip()
+        base_url = (data.get("base_url") or [""])[0].strip()
+        model = (data.get("model") or [""])[0].strip()
+
+        if provider not in ("deepseek", "openai"):
+            self._json({"error": "provider 仅支持 deepseek/openai"}, 400)
             return
+        if not api_key:
+            self._json({"error": "API Key 不能为空"}, 400)
+            return
+
+        from config import set_runtime_provider_config
+        set_runtime_provider_config(provider, api_key, base_url, model)
+        self._json(
+            {
+                "ok": True,
+                "message": f"{provider} API Key 已更新（仅本次运行有效）",
+                "provider": provider,
+            }
+        )
         set_mode(mode)
         self._json({"mode": get_mode(), "message": f"已切换到 {mode} 模式"})
 

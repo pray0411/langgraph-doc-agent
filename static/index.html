@@ -46,8 +46,8 @@
     <button class="mode-btn" data-mode="deepseek">在线 (DeepSeek)</button>
     <button class="mode-btn" data-mode="ollama">本地 (Ollama)</button>
     <button class="mode-btn" data-mode="offline">纯检索 (免费)</button>
+    <button class="mode-btn" id="settingsBtn" style="border-color:#999;color:#666;">⚙ 更换 API Key</button>
     <span class="mode-status" id="modeStatus"></span>
-  </div>
   </div>
 
   <div class="input-area">
@@ -61,8 +61,38 @@
     <div class="card"><h3>推理过程（Agent 执行日志）</h3><ul id="log"></ul></div>
     <div class="card"><h3>反思记录</h3><div id="reflection">—</div></div>
   </div>
-  <div class="hint">Powered by LangGraph · 双引擎搜索（博查 + DuckDuckGo）· 点击上方按钮切换在线/离线模式</div>
+  <div class="hint">Powered by LangGraph · 双引擎搜索（博查 + DuckDuckGo）· 点击上方按钮切换模式或更换 API Key</div>
 </div>
+
+<!-- 更换 API Key 弹窗 -->
+<div id="settingsModal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,.4); z-index:100; align-items:center; justify-content:center;">
+  <div style="background:#fff; border-radius:12px; padding:24px; width:420px; max-width:90%; box-shadow:0 4px 20px rgba(0,0,0,.2);">
+    <h3 style="margin-bottom:16px; color:#1a1a2e;">更换 API Key</h3>
+    <div style="margin-bottom:12px;">
+      <label style="font-size:13px; color:#666;">服务商</label>
+      <select id="cfgProvider" style="width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; margin-top:4px;">
+        <option value="deepseek">DeepSeek</option>
+        <option value="openai">OpenAI / 兼容服务</option>
+      </select>
+    </div>
+    <div style="margin-bottom:12px;">
+      <label style="font-size:13px; color:#666;">API Key</label>
+      <input id="cfgApiKey" type="password" placeholder="sk-..." style="width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; margin-top:4px;">
+    </div>
+    <div style="margin-bottom:12px;">
+      <label style="font-size:13px; color:#666;">Base URL（可选，默认用官方地址）</label>
+      <input id="cfgBaseUrl" placeholder="https://api.deepseek.com/v1" style="width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; margin-top:4px;">
+    </div>
+    <div style="margin-bottom:16px;">
+      <label style="font-size:13px; color:#666;">模型名（可选）</label>
+      <input id="cfgModel" placeholder="deepseek-chat" style="width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; margin-top:4px;">
+    </div>
+    <div style="text-align:right;">
+      <button id="cfgCancel" style="padding:8px 16px; border:1px solid #ddd; border-radius:8px; background:#fff; cursor:pointer; margin-right:8px;">取消</button>
+      <button id="cfgSave" style="padding:8px 16px; border:none; border-radius:8px; background:#4f46e5; color:#fff; cursor:pointer;">保存</button>
+    </div>
+    <div id="cfgMsg" style="margin-top:10px; font-size:13px; color:#dc2626;"></div>
+  </div>
 </div>
 
 <script>
@@ -129,6 +159,51 @@ modeBtns.forEach(b => {
 btn.addEventListener('click', ask);
 input.addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
 loadMode();
+
+// ===== 更换 API Key 弹窗逻辑 =====
+const settingsBtn = document.getElementById('settingsBtn');
+const settingsModal = document.getElementById('settingsModal');
+const cfgProvider = document.getElementById('cfgProvider');
+const cfgApiKey = document.getElementById('cfgApiKey');
+const cfgBaseUrl = document.getElementById('cfgBaseUrl');
+const cfgModel = document.getElementById('cfgModel');
+const cfgMsg = document.getElementById('cfgMsg');
+
+settingsBtn.addEventListener('click', () => {
+  cfgMsg.textContent = '';
+  cfgApiKey.value = '';
+  settingsModal.style.display = 'flex';
+});
+document.getElementById('cfgCancel').addEventListener('click', () => {
+  settingsModal.style.display = 'none';
+});
+settingsModal.addEventListener('click', e => {
+  if (e.target === settingsModal) settingsModal.style.display = 'none';
+});
+document.getElementById('cfgSave').addEventListener('click', async () => {
+  const provider = cfgProvider.value;
+  const apiKey = cfgApiKey.value.trim();
+  const baseUrl = cfgBaseUrl.value.trim();
+  const model = cfgModel.value.trim();
+  if (!apiKey) { cfgMsg.textContent = 'API Key 不能为空'; return; }
+  try {
+    const resp = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: 'provider=' + encodeURIComponent(provider)
+          + '&api_key=' + encodeURIComponent(apiKey)
+          + '&base_url=' + encodeURIComponent(baseUrl)
+          + '&model=' + encodeURIComponent(model)
+    });
+    const data = await resp.json();
+    if (data.error) { cfgMsg.textContent = data.error; return; }
+    cfgMsg.style.color = '#16a34a';
+    cfgMsg.textContent = '✅ ' + data.message;
+    setTimeout(() => { settingsModal.style.display = 'none'; }, 1200);
+  } catch (err) {
+    cfgMsg.textContent = '请求失败: ' + err.message;
+  }
+});
 async function ask() {
   const question = input.value.trim();
   if (!question) return;

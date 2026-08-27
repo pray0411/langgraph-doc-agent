@@ -36,3 +36,32 @@ TOP_K = int(os.getenv("TOP_K", "3"))
 MIN_SCORE = float(os.getenv("MIN_SCORE", "0.05"))  # 检索最低相似度阈值
 
 INDEX_FILE = INDEX_DIR / "index.json"
+
+# ===== 运行时 API 配置（网页端可动态更换，不写入文件）=====
+# 结构: {provider: {"api_key": str, "base_url": str, "model": str}}
+# 未设置时回退到上方从 .env 读取的默认值
+_runtime_provider_config: dict = {}
+
+
+def set_runtime_provider_config(provider: str, api_key: str, base_url: str = "", model: str = ""):
+    """设置某 provider 的运行时配置（网页端更换 Key 用）。"""
+    _runtime_provider_config[provider.lower()] = {
+        "api_key": api_key,
+        "base_url": base_url,
+        "model": model,
+    }
+
+
+def get_provider_config(provider: str) -> dict:
+    """获取 provider 的有效配置（优先运行时设置，回退 .env 默认）。"""
+    provider = provider.lower()
+    # 运行时设置优先
+    if provider in _runtime_provider_config:
+        return _runtime_provider_config[provider]
+
+    # 回退到 .env 默认
+    if provider == "deepseek":
+        return {"api_key": DEEPSEEK_API_KEY, "base_url": LLM_BASE_URL or "https://api.deepseek.com/v1", "model": LLM_MODEL}
+    if provider == "openai":
+        return {"api_key": OPENAI_API_KEY, "base_url": LLM_BASE_URL or "https://api.openai.com/v1", "model": LLM_MODEL}
+    return {"api_key": "", "base_url": "", "model": ""}
