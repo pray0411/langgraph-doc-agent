@@ -65,26 +65,18 @@
   #askBtn { width: 38px; height: 38px; border: none; border-radius: 10px; background: #10a37f; color: #fff; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; transition: background .15s; flex-shrink: 0; }
   #askBtn:hover { background: #0e8f70; }
   #askBtn:disabled { background: #b9b9c4; cursor: not-allowed; }
-  .input-hint { max-width: 800px; margin: 8px auto 0; font-size: 12px; color: #b0b0bc; text-align: center; }
-</style>
+  #keyToggle { width: 32px; height: 38px; border: none; background: none; color: #999; cursor: pointer; font-size: 16px; flex-shrink: 0; transition: color .15s; }
+  #keyToggle:hover { color: #10a37f; }
+  .current-model { font-size: 12px; color: #b0b0bc; padding: 0 6px 4px 0; flex-shrink: 0; white-space: nowrap; }
 </head>
 <body>
 <div class="app">
   <header>
     <div class="logo"><div class="logo-icon">✦</div> AI Agent</div>
     <div class="header-right">
-      <select id="modeSelect">
-        <option value="deepseek">DeepSeek</option>
-        <option value="openai">OpenAI</option>
-        <option value="qwen">通义千问</option>
-        <option value="zhipu">智谱GLM</option>
-        <option value="moonshot">Kimi</option>
-        <option value="ollama">本地 · Ollama</option>
-        <option value="offline">纯检索 · 免费</option>
-      </select>
       <button class="h-btn" id="clearBtn">新对话</button>
-      <button class="h-btn" id="settingsBtn">Key 设置</button>
     </div>
+  </header>
   </header>
 
   <div id="chatArea">
@@ -141,6 +133,7 @@
 
     <div class="input-box">
       <button id="keyToggle" title="API Key 设置">⚙</button>
+      <span class="current-model" id="currentModel"></span>
       <textarea id="question" rows="1" placeholder="发送消息…"></textarea>
       <button id="askBtn" title="发送">➤</button>
     </div>
@@ -153,17 +146,51 @@ const input = document.getElementById('question');
 const btn = document.getElementById('askBtn');
 const chatInner = document.getElementById('chatInner');
 const chatArea = document.getElementById('chatArea');
-const modeSelect = document.getElementById('modeSelect');
-const settingsBtn = document.getElementById('settingsBtn');
 const keyPanel = document.getElementById('keyPanel');
 const keyToggle = document.getElementById('keyToggle');
 const keyPanelClose = document.getElementById('keyPanelClose');
+const currentModel = document.getElementById('currentModel');
 const cfgProvider = document.getElementById('cfgProvider');
 const cfgApiKey = document.getElementById('cfgApiKey');
 const cfgBaseUrl = document.getElementById('cfgBaseUrl');
 const cfgModel = document.getElementById('cfgModel');
 const cfgMsg = document.getElementById('cfgMsg');
 let history = [];
+let currentMode = 'deepseek';
+
+// 当前模型显示映射
+const MODEL_NAMES = {
+  'deepseek': 'DeepSeek',
+  'openai': 'OpenAI',
+  'qwen': '通义千问',
+  'zhipu': '智谱GLM',
+  'moonshot': 'Kimi',
+  'ollama': '本地 Ollama',
+  'offline': '纯检索'
+};
+
+function updateModelDisplay(mode) {
+  currentMode = mode;
+  currentModel.textContent = MODEL_NAMES[mode] || mode;
+}
+
+async function loadMode() {
+  try {
+    const resp = await fetch('/api/mode');
+    const data = await resp.json();
+    updateModelDisplay(data.mode);
+  } catch (e) {}
+}
+async function switchMode(mode) {
+  const resp = await fetch('/api/mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'mode=' + encodeURIComponent(mode)
+  });
+  const data = await resp.json();
+  if (data.error) { alert('切换失败: ' + data.error); return; }
+  updateModelDisplay(data.mode);
+}
 
 function scrollBottom() { chatArea.scrollTop = chatArea.scrollHeight; }
 
@@ -264,30 +291,6 @@ document.getElementById('clearBtn').addEventListener('click', () => {
   chatInner.innerHTML = '<div class="welcome" id="welcome"><div class="welcome-icon">✦</div><h2>我能帮你做什么？</h2><p>文档问答 · 实时天气 · 联网搜索 · 普通对话</p><div class="welcome-suggestions"><div class="suggestion" onclick="quickAsk(\'这个项目的核心架构是什么？\')">项目架构</div><div class="suggestion" onclick="quickAsk(\'今天北京的天气怎么样？\')">查天气</div><div class="suggestion" onclick="quickAsk(\'最近有什么AI新闻？\')">AI 新闻</div><div class="suggestion" onclick="quickAsk(\'1+1等于几？\')">算数</div></div></div>';
 });
 
-async function loadMode() {
-  try {
-    const resp = await fetch('/api/mode');
-    const data = await resp.json();
-    const avail = data.available_modes || ['deepseek', 'offline'];
-    Array.from(modeSelect.options).forEach(opt => {
-      opt.style.display = avail.includes(opt.value) ? '' : 'none';
-    });
-    modeSelect.value = data.mode;
-  } catch (e) {}
-}
-async function switchMode(mode) {
-  const resp = await fetch('/api/mode', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'mode=' + encodeURIComponent(mode)
-  });
-  const data = await resp.json();
-  if (data.error) { alert('切换失败: ' + data.error); return; }
-  modeSelect.value = data.mode;
-}
-modeSelect.addEventListener('change', () => switchMode(modeSelect.value));
-
-settingsBtn.addEventListener('click', () => keyPanel.classList.add('open'));
 keyToggle.addEventListener('click', () => {
   keyPanel.classList.toggle('open');
   if (keyPanel.classList.contains('open')) cfgMsg.textContent = '';
@@ -313,7 +316,6 @@ document.getElementById('cfgSave').addEventListener('click', async () => {
     if (data.error) { cfgMsg.textContent = data.error; return; }
     cfgMsg.style.color = '#16a34a';
     cfgMsg.textContent = '✅ ' + data.message;
-    modeSelect.value = provider;
     switchMode(provider);
     setTimeout(() => {
       keyPanel.classList.remove('open');
