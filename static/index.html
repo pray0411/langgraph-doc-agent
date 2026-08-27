@@ -42,15 +42,17 @@
   </header>
 
   <div class="mode-bar">
-    <span>运行模式：</span>
-    <button class="mode-btn" data-mode="deepseek">DeepSeek</button>
-    <button class="mode-btn" data-mode="openai">OpenAI</button>
-    <button class="mode-btn" data-mode="qwen">通义</button>
-    <button class="mode-btn" data-mode="zhipu">智谱</button>
-    <button class="mode-btn" data-mode="moonshot">Kimi</button>
-    <button class="mode-btn" data-mode="ollama">本地</button>
-    <button class="mode-btn" data-mode="offline">纯检索</button>
-    <button class="mode-btn" id="settingsBtn" style="border-color:#999;color:#666;">⚙ 换 Key</button>
+    <span style="font-size:13px; color:#666;">模式：</span>
+    <select id="modeSelect" style="padding:8px 12px; border:1px solid #ddd; border-radius:8px; font-size:13px; background:#fff; cursor:pointer;">
+      <option value="deepseek">在线 · DeepSeek</option>
+      <option value="openai">在线 · OpenAI</option>
+      <option value="qwen">在线 · 通义千问</option>
+      <option value="zhipu">在线 · 智谱GLM</option>
+      <option value="moonshot">在线 · Kimi</option>
+      <option value="ollama">本地 · Ollama</option>
+      <option value="offline">纯检索 · 免费</option>
+    </select>
+    <button class="mode-btn" id="settingsBtn" style="border-color:#999;color:#666;">⚙ 更换 Key</button>
     <span class="mode-status" id="modeStatus"></span>
   </div>
 
@@ -107,20 +109,20 @@ const input = document.getElementById('question');
 const btn = document.getElementById('askBtn');
 const answerEl = document.getElementById('answer');
 const logEl = document.getElementById('log');
-const modeBtns = document.querySelectorAll('.mode-btn[data-mode]');
-const modeBtns = document.querySelectorAll('.mode-btn');
+const refEl = document.getElementById('reflection');
+const modeSelect = document.getElementById('modeSelect');
 const modeStatus = document.getElementById('modeStatus');
 let currentMode = 'deepseek';
 
-// 加载当前模式 + 动态显示可用模式按钮
+// 加载当前模式 + 动态隐藏不可用选项（如 Ollama 未安装）
 async function loadMode() {
   try {
     const resp = await fetch('/api/mode');
     const data = await resp.json();
     const avail = data.available_modes || ['deepseek', 'offline'];
-    // 只显示可用的模式按钮（如 Ollama 未安装则不显示）
-    modeBtns.forEach(b => {
-      b.style.display = avail.includes(b.dataset.mode) ? '' : 'none';
+    // 隐藏不可用的选项
+    Array.from(modeSelect.options).forEach(opt => {
+      opt.style.display = avail.includes(opt.value) ? '' : 'none';
     });
     setModeUI(data.mode);
   } catch (e) { /* 服务未就绪时保持默认 */ }
@@ -151,9 +153,7 @@ async function switchMode(mode) {
 
 function setModeUI(mode) {
   currentMode = mode;
-  modeBtns.forEach(b => {
-    b.classList.toggle('active', b.dataset.mode === mode);
-  });
+  modeSelect.value = mode;
   const status = {
     'deepseek': '当前：DeepSeek',
     'openai': '当前：OpenAI',
@@ -166,9 +166,8 @@ function setModeUI(mode) {
   modeStatus.textContent = status[mode] || ('当前：' + mode);
 }
 
-// 绑定模式按钮
-modeBtns.forEach(b => {
-  b.addEventListener('click', () => switchMode(b.dataset.mode));
+// 下拉选择切换模式
+modeSelect.addEventListener('change', () => switchMode(modeSelect.value));
 });
 
 btn.addEventListener('click', ask);
@@ -214,6 +213,9 @@ document.getElementById('cfgSave').addEventListener('click', async () => {
     if (data.error) { cfgMsg.textContent = data.error; return; }
     cfgMsg.style.color = '#16a34a';
     cfgMsg.textContent = '✅ ' + data.message;
+    // 保存后自动切换到对应服务商模式
+    modeSelect.value = provider;
+    switchMode(provider);
     setTimeout(() => { settingsModal.style.display = 'none'; }, 1200);
   } catch (err) {
     cfgMsg.textContent = '请求失败: ' + err.message;
