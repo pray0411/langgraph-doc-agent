@@ -12,6 +12,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+@pytest.fixture(autouse=True)
+def _clean_env():
+    """每个测试前清理环境变量，避免测试间干扰。"""
+    os.environ.pop("LLM_PROVIDER", None)
+    yield
+    os.environ.pop("LLM_PROVIDER", None)
+
+
 # ---------- 检索 ----------
 
 def test_search_relevant_query_returns_hits():
