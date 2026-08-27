@@ -3,128 +3,237 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LangGraph 智能文档问答 Agent</title>
+<title>AI Agent</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background: linear-gradient(135deg, #f0f4ff 0%, #fdf2f8 100%); color: #333; min-height: 100vh; }
-  .container { max-width: 760px; margin: 0 auto; padding: 32px 20px 60px; }
-  header { text-align: center; padding: 20px 0 12px; }
-  header h1 { font-size: 26px; color: #1a1a2e; font-weight: 700; letter-spacing: .5px; }
-  header p { color: #8892a6; margin-top: 6px; font-size: 14px; }
-  .badge { display: inline-block; background: rgba(79,70,229,.1); color: #4f46e5; border-radius: 20px; padding: 3px 12px; font-size: 12px; margin-left: 8px; font-weight: 500; }
-  .mode-bar { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 22px 0 6px; font-size: 13px; color: #666; flex-wrap: wrap; }
-  #modeSelect { padding: 9px 14px; border: 1px solid #dde3ee; border-radius: 10px; font-size: 13px; background: #fff; cursor: pointer; outline: none; transition: border .2s; }
-  #modeSelect:focus { border-color: #4f46e5; }
-  .mode-btn { padding: 8px 16px; border: 1px solid #dde3ee; background: #fff; color: #5a6478; border-radius: 10px; font-size: 13px; cursor: pointer; transition: all .2s; }
-  .mode-btn:hover { border-color: #4f46e5; color: #4f46e5; background: #f8f9ff; }
-  .mode-status { font-size: 12px; color: #99a1b3; }
-  .input-area { display: flex; gap: 10px; margin: 18px 0 8px; }
-  #question { flex: 1; padding: 15px 18px; border: 1px solid #dde3ee; border-radius: 12px; font-size: 15px; outline: none; background: #fff; transition: border .2s, box-shadow .2s; }
-  #question:focus { border-color: #4f46e5; box-shadow: 0 0 0 3px rgba(79,70,229,.1); }
-  #askBtn { padding: 15px 30px; background: linear-gradient(135deg, #4f46e5, #7c3aed); color: #fff; border: none; border-radius: 12px; font-size: 15px; cursor: pointer; transition: opacity .2s; }
-  #askBtn:hover { opacity: .9; }
+  body { font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background: #fff; color: #1f2328; height: 100vh; overflow: hidden; }
+  .app { display: flex; flex-direction: column; height: 100vh; max-width: 900px; margin: 0 auto; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid #e8e8e8; background: #fff; }
+  .logo { font-size: 16px; font-weight: 700; color: #1f2328; display: flex; align-items: center; gap: 8px; }
+  .logo span { color: #4f46e5; }
+  .header-actions { display: flex; align-items: center; gap: 10px; }
+  #modeSelect { padding: 6px 10px; border: 1px solid #e0e0e0; border-radius: 8px; font-size: 13px; background: #fff; cursor: pointer; outline: none; }
+  .header-btn { padding: 6px 12px; border: 1px solid #e0e0e0; border-radius: 8px; background: #fff; color: #57606a; font-size: 13px; cursor: pointer; }
+  .header-btn:hover { border-color: #4f46e5; color: #4f46e5; }
+  #chatArea { flex: 1; overflow-y: auto; padding: 24px 20px; display: flex; flex-direction: column; gap: 16px; }
+  .msg { display: flex; gap: 12px; max-width: 100%; }
+  .msg.user { flex-direction: row-reverse; }
+  .avatar { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
+  .msg.user .avatar { background: linear-gradient(135deg, #4f46e5, #7c3aed); color: #fff; }
+  .msg.assistant .avatar { background: #f0f0f0; color: #57606a; }
+  .bubble { padding: 12px 16px; border-radius: 12px; font-size: 14px; line-height: 1.7; max-width: 78%; white-space: pre-wrap; word-break: break-word; }
+  .msg.user .bubble { background: #4f46e5; color: #fff; border-top-right-radius: 4px; }
+  .msg.assistant .bubble { background: #f6f8fa; color: #1f2328; border-top-left-radius: 4px; }
+  .bubble.error { background: #fef2f2; color: #dc2626; }
+  .typing { color: #999; font-size: 13px; }
+  .typing::after { content: '…'; animation: dots 1.2s infinite; }
+  @keyframes dots { 0%, 20% { content: ''; } 40% { content: '.'; } 60% { content: '..'; } 80%, 100% { content: '...'; } }
+  .input-area { border-top: 1px solid #e8e8e8; padding: 12px 20px 16px; display: flex; gap: 10px; background: #fff; }
+  #question { flex: 1; padding: 12px 16px; border: 1px solid #e0e0e0; border-radius: 10px; font-size: 14px; outline: none; resize: none; }
+  #question:focus { border-color: #4f46e5; }
+  #askBtn { padding: 12px 24px; background: #4f46e5; color: #fff; border: none; border-radius: 10px; font-size: 14px; cursor: pointer; }
+  #askBtn:hover { background: #4338ca; }
   #askBtn:disabled { opacity: .5; cursor: not-allowed; }
-  .meta { font-size: 12px; color: #a0a8ba; margin-bottom: 18px; }
-  .card { background: #fff; border-radius: 16px; padding: 24px; box-shadow: 0 2px 12px rgba(26,26,46,.06); }
-  .card h3 { font-size: 13px; color: #4f46e5; margin-bottom: 14px; font-weight: 600; letter-spacing: .5px; }
-  #answer { white-space: pre-wrap; line-height: 1.8; font-size: 15px; color: #2d3340; }
-  .loading { color: #4f46e5; font-size: 14px; }
-  .error { color: #dc2626; }
-  .hint { font-size: 12px; color: #b0b7c6; text-align: center; margin-top: 24px; }
-</style>
+  .empty-hint { text-align: center; color: #b0b7c6; margin-top: 60px; font-size: 14px; }
+  .empty-hint .big { font-size: 40px; margin-bottom: 12px; }
+
+  /* 换 Key 弹窗 */
+  #settingsModal { display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,.4); z-index:100; align-items:center; justify-content:center; }
+  .modal-card { background:#fff; border-radius:12px; padding:24px; width:420px; max-width:90%; box-shadow:0 4px 20px rgba(0,0,0,.2); }
+  .modal-card h3 { margin-bottom:16px; color:#1a1a2e; font-size:16px; }
+  .modal-card label { font-size:13px; color:#666; display:block; margin-bottom:4px; }
+  .modal-card select, .modal-card input { width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; margin-bottom:12px; font-size:13px; }
+  .modal-card .row { text-align:right; }
+  .modal-card button { padding:8px 16px; border-radius:8px; cursor:pointer; font-size:13px; }
+  .btn-cancel { border:1px solid #ddd; background:#fff; margin-right:8px; }
+  .btn-save { border:none; background:#4f46e5; color:#fff; }
+  #cfgMsg { margin-top:10px; font-size:13px; color:#dc2626; }
 </style>
 </head>
 <body>
-<div class="container">
+<div class="app">
   <header>
-    <h1>LangGraph 智能文档问答 Agent <span class="badge">ReAct + RAG</span></h1>
-    <p>文档问答 · 实时天气 · 联网搜索 · 普通对话</p>
+    <div class="logo"><span>✦</span> AI Agent</div>
+    <div class="header-actions">
+      <select id="modeSelect">
+        <option value="deepseek">DeepSeek</option>
+        <option value="openai">OpenAI</option>
+        <option value="qwen">通义千问</option>
+        <option value="zhipu">智谱GLM</option>
+        <option value="moonshot">Kimi</option>
+        <option value="ollama">本地 · Ollama</option>
+        <option value="offline">纯检索 · 免费</option>
+      </select>
+      <button class="header-btn" id="clearBtn">清空</button>
+      <button class="header-btn" id="settingsBtn">⚙ Key</button>
+    </div>
   </header>
 
-  <div class="mode-bar">
-    <span style="font-size:13px; color:#666;">模式：</span>
-    <select id="modeSelect" style="padding:8px 12px; border:1px solid #ddd; border-radius:8px; font-size:13px; background:#fff; cursor:pointer;">
-      <option value="deepseek">在线 · DeepSeek</option>
-      <option value="openai">在线 · OpenAI</option>
-      <option value="qwen">在线 · 通义千问</option>
-      <option value="zhipu">在线 · 智谱GLM</option>
-      <option value="moonshot">在线 · Kimi</option>
-      <option value="ollama">本地 · Ollama</option>
-      <option value="offline">纯检索 · 免费</option>
-    </select>
-    <button class="mode-btn" id="settingsBtn" style="border-color:#999;color:#666;">⚙ 更换 Key</button>
-    <span class="mode-status" id="modeStatus"></span>
+  <div id="chatArea">
+    <div class="empty-hint">
+      <div class="big">✦</div>
+      <div>我是 AI Agent，可以对话、查天气、搜新闻、读文档</div>
+      <div style="margin-top:6px; font-size:12px;">试试问我：今天北京天气 / 最近有什么AI新闻 / 这个项目的架构</div>
+    </div>
   </div>
 
   <div class="input-area">
-    <input id="question" placeholder="输入问题，例如：这个项目的核心架构是什么？" autocomplete="off">
-    <button id="askBtn">提问</button>
+    <textarea id="question" rows="1" placeholder="输入消息… (Enter 发送)" style="max-height:120px;"></textarea>
+    <button id="askBtn">发送</button>
   </div>
-  <div class="meta">示例：项目的核心功能 / 用什么框架 / 如何部署 / 今天天气 / 最近AI新闻</div>
-
-  <div id="result">
-    <div class="card"><h3>回答</h3><div id="answer" class="loading">等待提问…</div></div>
-  </div>
-  <div class="hint">Powered by LangGraph · 双引擎搜索（博查 + DuckDuckGo）· 点击上方按钮切换模式或更换 API Key</div>
 </div>
 
 <!-- 更换 API Key 弹窗 -->
-<div id="settingsModal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,.4); z-index:100; align-items:center; justify-content:center;">
-  <div style="background:#fff; border-radius:12px; padding:24px; width:420px; max-width:90%; box-shadow:0 4px 20px rgba(0,0,0,.2);">
-    <h3 style="margin-bottom:16px; color:#1a1a2e;">更换 API Key</h3>
-    <div style="margin-bottom:12px;">
-      <label style="font-size:13px; color:#666;">服务商</label>
-      <select id="cfgProvider" style="width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; margin-top:4px;">
-        <option value="deepseek">DeepSeek（deepseek-chat）</option>
-        <option value="openai">OpenAI（gpt-4o-mini）</option>
-        <option value="qwen">通义千问（qwen-plus）</option>
-        <option value="zhipu">智谱 GLM（glm-4-flash）</option>
-        <option value="moonshot">Kimi（moonshot-v1-8k）</option>
-      </select>
+<div id="settingsModal">
+  <div class="modal-card">
+    <h3>更换 API Key</h3>
+    <label>服务商</label>
+    <select id="cfgProvider">
+      <option value="deepseek">DeepSeek（deepseek-chat）</option>
+      <option value="openai">OpenAI（gpt-4o-mini）</option>
+      <option value="qwen">通义千问（qwen-plus）</option>
+      <option value="zhipu">智谱 GLM（glm-4-flash）</option>
+      <option value="moonshot">Kimi（moonshot-v1-8k）</option>
+    </select>
+    <label>API Key</label>
+    <input id="cfgApiKey" type="password" placeholder="sk-...">
+    <label>Base URL（可选）</label>
+    <input id="cfgBaseUrl" placeholder="默认官方地址">
+    <label>模型名（可选）</label>
+    <input id="cfgModel" placeholder="默认模型">
+    <div class="row">
+      <button class="btn-cancel" id="cfgCancel">取消</button>
+      <button class="btn-save" id="cfgSave">保存</button>
     </div>
-    <div style="margin-bottom:12px;">
-      <label style="font-size:13px; color:#666;">API Key</label>
-      <input id="cfgApiKey" type="password" placeholder="sk-..." style="width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; margin-top:4px;">
-    </div>
-    <div style="margin-bottom:12px;">
-      <label style="font-size:13px; color:#666;">Base URL（可选，默认用官方地址）</label>
-      <input id="cfgBaseUrl" placeholder="https://api.deepseek.com/v1" style="width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; margin-top:4px;">
-    </div>
-    <div style="margin-bottom:16px;">
-      <label style="font-size:13px; color:#666;">模型名（可选）</label>
-      <input id="cfgModel" placeholder="deepseek-chat" style="width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; margin-top:4px;">
-    </div>
-    <div style="text-align:right;">
-      <button id="cfgCancel" style="padding:8px 16px; border:1px solid #ddd; border-radius:8px; background:#fff; cursor:pointer; margin-right:8px;">取消</button>
-      <button id="cfgSave" style="padding:8px 16px; border:none; border-radius:8px; background:#4f46e5; color:#fff; cursor:pointer;">保存</button>
-    </div>
-    <div id="cfgMsg" style="margin-top:10px; font-size:13px; color:#dc2626;"></div>
+    <div id="cfgMsg"></div>
   </div>
 </div>
 
 <script>
 const input = document.getElementById('question');
 const btn = document.getElementById('askBtn');
-const answerEl = document.getElementById('answer');
+const chatArea = document.getElementById('chatArea');
 const modeSelect = document.getElementById('modeSelect');
-const modeStatus = document.getElementById('modeStatus');
+const settingsBtn = document.getElementById('settingsBtn');
+const settingsModal = document.getElementById('settingsModal');
+const cfgProvider = document.getElementById('cfgProvider');
+const cfgApiKey = document.getElementById('cfgApiKey');
+const cfgBaseUrl = document.getElementById('cfgBaseUrl');
+const cfgModel = document.getElementById('cfgModel');
+const cfgMsg = document.getElementById('cfgMsg');
 let currentMode = 'deepseek';
+let history = [];  // 多轮对话历史
 
-// 加载当前模式 + 动态隐藏不可用选项（如 Ollama 未安装）
+// ---------- 消息渲染 ----------
+function addMessage(role, content) {
+  // 移除空状态提示
+  const empty = chatArea.querySelector('.empty-hint');
+  if (empty) empty.remove();
+
+  const msg = document.createElement('div');
+  msg.className = 'msg ' + role;
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar';
+  avatar.textContent = role === 'user' ? '我' : 'AI';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = content;
+  msg.appendChild(avatar);
+  msg.appendChild(bubble);
+  chatArea.appendChild(msg);
+  chatArea.scrollTop = chatArea.scrollHeight;
+}
+
+function addTyping() {
+  const msg = document.createElement('div');
+  msg.className = 'msg assistant';
+  msg.id = 'typingMsg';
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar';
+  avatar.textContent = 'AI';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble typing';
+  bubble.textContent = '思考中';
+  msg.appendChild(avatar);
+  msg.appendChild(bubble);
+  chatArea.appendChild(msg);
+  chatArea.scrollTop = chatArea.scrollHeight;
+}
+
+function removeTyping() {
+  const t = document.getElementById('typingMsg');
+  if (t) t.remove();
+}
+
+// ---------- 提问 ----------
+async function ask() {
+  const question = input.value.trim();
+  if (!question) return;
+  input.value = '';
+  input.style.height = 'auto';
+
+  addMessage('user', question);
+  addTyping();
+  btn.disabled = true;
+
+  try {
+    const resp = await fetch('/ask', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: 'question=' + encodeURIComponent(question)
+          + '&history=' + encodeURIComponent(JSON.stringify(history))
+    });
+    const data = await resp.json();
+    removeTyping();
+    if (data.error) {
+      addMessage('assistant', '⚠️ ' + data.error);
+      return;
+    }
+    addMessage('assistant', data.answer);
+    // 更新历史
+    history.push({role: 'user', content: question});
+    history.push({role: 'assistant', content: data.answer});
+    if (history.length > 40) history = history.slice(-40);
+  } catch (err) {
+    removeTyping();
+    addMessage('assistant', '⚠️ 请求失败: ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---------- 输入框 ----------
+btn.addEventListener('click', ask);
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    ask();
+  }
+});
+// 自动增高
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+});
+
+// ---------- 清空对话 ----------
+document.getElementById('clearBtn').addEventListener('click', () => {
+  history = [];
+  chatArea.innerHTML = '<div class="empty-hint"><div class="big">✦</div><div>新对话已开始</div></div>';
+});
+
+// ---------- 模式 ----------
 async function loadMode() {
   try {
     const resp = await fetch('/api/mode');
     const data = await resp.json();
     const avail = data.available_modes || ['deepseek', 'offline'];
-    // 隐藏不可用的选项
     Array.from(modeSelect.options).forEach(opt => {
       opt.style.display = avail.includes(opt.value) ? '' : 'none';
     });
-    setModeUI(data.mode);
-  } catch (e) { /* 服务未就绪时保持默认 */ }
+    modeSelect.value = data.mode;
+  } catch (e) {}
 }
-
-// 切换模式
 async function switchMode(mode) {
   const resp = await fetch('/api/mode', {
     method: 'POST',
@@ -133,51 +242,11 @@ async function switchMode(mode) {
   });
   const data = await resp.json();
   if (data.error) { alert('切换失败: ' + data.error); return; }
-  setModeUI(data.mode);
-  answerEl.className = 'loading';
-  const tips = {
-    'deepseek': 'DeepSeek（完整能力：天气/搜索/对话）',
-    'openai': 'OpenAI',
-    'qwen': '通义千问',
-    'zhipu': '智谱 GLM',
-    'moonshot': 'Kimi',
-    'ollama': '本地模型（Ollama，免费离线对话）',
-    'offline': '纯检索（免费，仅本地文档检索）'
-  };
-  answerEl.textContent = '已切换到 ' + (tips[data.mode] || data.mode) + '，可以提问了';
+  modeSelect.value = data.mode;
 }
-
-function setModeUI(mode) {
-  currentMode = mode;
-  modeSelect.value = mode;
-  const status = {
-    'deepseek': '当前：DeepSeek',
-    'openai': '当前：OpenAI',
-    'qwen': '当前：通义千问',
-    'zhipu': '当前：智谱 GLM',
-    'moonshot': '当前：Kimi',
-    'ollama': '当前：本地模型（Ollama）',
-    'offline': '当前：纯检索（免费）'
-  };
-  modeStatus.textContent = status[mode] || ('当前：' + mode);
-}
-
-// 下拉选择切换模式
 modeSelect.addEventListener('change', () => switchMode(modeSelect.value));
 
-btn.addEventListener('click', ask);
-input.addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
-loadMode();
-
-// ===== 更换 API Key 弹窗逻辑 =====
-const settingsBtn = document.getElementById('settingsBtn');
-const settingsModal = document.getElementById('settingsModal');
-const cfgProvider = document.getElementById('cfgProvider');
-const cfgApiKey = document.getElementById('cfgApiKey');
-const cfgBaseUrl = document.getElementById('cfgBaseUrl');
-const cfgModel = document.getElementById('cfgModel');
-const cfgMsg = document.getElementById('cfgMsg');
-
+// ---------- 换 Key ----------
 settingsBtn.addEventListener('click', () => {
   cfgMsg.textContent = '';
   cfgApiKey.value = '';
@@ -208,7 +277,6 @@ document.getElementById('cfgSave').addEventListener('click', async () => {
     if (data.error) { cfgMsg.textContent = data.error; return; }
     cfgMsg.style.color = '#16a34a';
     cfgMsg.textContent = '✅ ' + data.message;
-    // 保存后自动切换到对应服务商模式
     modeSelect.value = provider;
     switchMode(provider);
     setTimeout(() => { settingsModal.style.display = 'none'; }, 1200);
@@ -216,29 +284,8 @@ document.getElementById('cfgSave').addEventListener('click', async () => {
     cfgMsg.textContent = '请求失败: ' + err.message;
   }
 });
-async function ask() {
-  const question = input.value.trim();
-  if (!question) return;
-  btn.disabled = true;
-  answerEl.className = 'loading';
-  answerEl.textContent = 'Agent 正在思考…';
-  try {
-    const resp = await fetch('/ask', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: 'question=' + encodeURIComponent(question)
-    });
-    const data = await resp.json();
-    if (data.error) { answerEl.className = 'error'; answerEl.textContent = data.error; return; }
-    answerEl.className = '';
-    answerEl.textContent = data.answer;
-  } catch (err) {
-    answerEl.className = 'error';
-    answerEl.textContent = '请求失败: ' + err.message;
-  } finally {
-    btn.disabled = false;
-  }
-}
+
+loadMode();
 </script>
 </body>
 </html>

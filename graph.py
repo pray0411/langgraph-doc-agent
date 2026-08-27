@@ -120,15 +120,23 @@ def ask(
     confirmed: bool = True,
     show_log: bool = False,
     mode: str | None = None,
+    history: list[dict] | None = None,
 ) -> tuple[str, AgentResult]:
     """对外问答入口：执行一次 Agent 推理，返回 (回答, 结果详情)。
 
-    confirmed: 保留的兼容参数。V2 的 ReAct 循环中，模型自主决定是否继续，
-    不再有独立的人工确认节点。
-    mode: 可选，动态指定运行模式（deepseek/openai/offline），不传用配置默认。
+    confirmed: 保留的兼容参数。V2 的 ReAct 循环中，模型自主决定是否继续。
+    mode: 可选，动态指定运行模式（deepseek/openai/ollama/offline）。
+    history: 可选，多轮对话历史 [{"role": "user"/"assistant", "content": str}, ...]。
     """
     agent = build_agent(mode)
-    result = agent.invoke({"messages": [{"role": "user", "content": question}]})
+
+    # 组装消息：历史 + 当前问题（多轮对话记忆）
+    messages_in = []
+    if history:
+        messages_in.extend(history)
+    messages_in.append({"role": "user", "content": question})
+
+    result = agent.invoke({"messages": messages_in})
     messages = result.get("messages", [])
     if not messages:
         return "", {"answer": "", "messages": [], "reflection": ""}

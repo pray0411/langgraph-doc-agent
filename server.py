@@ -161,14 +161,30 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "问题不能为空"}, 400)
             return
 
+        # 解析多轮对话历史（JSON 数组，可选）
+        history = []
+        hist_raw = (data.get("history") or [""])[0].strip()
+        if hist_raw:
+            try:
+                parsed = json.loads(hist_raw)
+                if isinstance(parsed, list):
+                    # 只保留 user/assistant 角色，限制条数避免过长
+                    history = [
+                        {"role": m["role"], "content": m["content"]}
+                        for m in parsed
+                        if m.get("role") in ("user", "assistant") and m.get("content")
+                    ][-20:]
+            except (json.JSONDecodeError, KeyError, TypeError):
+                history = []
+
         # 单请求超时：子线程执行，主线程等待，超时返回
         result_box = {}
         timer = threading.Timer(REQUEST_TIMEOUT, lambda: result_box.setdefault("timeout", True))
 
         def _run():
             try:
-                # 使用当前动态模式（运行时切换，无需重启服务）
-                answer, result = ask(question, mode=get_mode())
+                # 使用当前动态模式 + 多轮历史（运行时切换，无需重启服务）
+                answer, result = ask(question, mode=get_mode(), history=history)
                 result_box["ok"] = (answer, result)
             except Exception:  # noqa: BLE001
                 result_box["error"] = True
