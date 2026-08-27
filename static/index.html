@@ -43,10 +43,14 @@
 
   <div class="mode-bar">
     <span>运行模式：</span>
-    <button class="mode-btn" data-mode="deepseek">在线 (DeepSeek)</button>
-    <button class="mode-btn" data-mode="ollama">本地 (Ollama)</button>
-    <button class="mode-btn" data-mode="offline">纯检索 (免费)</button>
-    <button class="mode-btn" id="settingsBtn" style="border-color:#999;color:#666;">⚙ 更换 API Key</button>
+    <button class="mode-btn" data-mode="deepseek">DeepSeek</button>
+    <button class="mode-btn" data-mode="openai">OpenAI</button>
+    <button class="mode-btn" data-mode="qwen">通义</button>
+    <button class="mode-btn" data-mode="zhipu">智谱</button>
+    <button class="mode-btn" data-mode="moonshot">Kimi</button>
+    <button class="mode-btn" data-mode="ollama">本地</button>
+    <button class="mode-btn" data-mode="offline">纯检索</button>
+    <button class="mode-btn" id="settingsBtn" style="border-color:#999;color:#666;">⚙ 换 Key</button>
     <span class="mode-status" id="modeStatus"></span>
   </div>
 
@@ -71,8 +75,11 @@
     <div style="margin-bottom:12px;">
       <label style="font-size:13px; color:#666;">服务商</label>
       <select id="cfgProvider" style="width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; margin-top:4px;">
-        <option value="deepseek">DeepSeek</option>
-        <option value="openai">OpenAI / 兼容服务</option>
+        <option value="deepseek">DeepSeek（deepseek-chat）</option>
+        <option value="openai">OpenAI（gpt-4o-mini）</option>
+        <option value="qwen">通义千问（qwen-plus）</option>
+        <option value="zhipu">智谱 GLM（glm-4-flash）</option>
+        <option value="moonshot">Kimi（moonshot-v1-8k）</option>
       </select>
     </div>
     <div style="margin-bottom:12px;">
@@ -100,7 +107,7 @@ const input = document.getElementById('question');
 const btn = document.getElementById('askBtn');
 const answerEl = document.getElementById('answer');
 const logEl = document.getElementById('log');
-const refEl = document.getElementById('reflection');
+const modeBtns = document.querySelectorAll('.mode-btn[data-mode]');
 const modeBtns = document.querySelectorAll('.mode-btn');
 const modeStatus = document.getElementById('modeStatus');
 let currentMode = 'deepseek';
@@ -131,9 +138,13 @@ async function switchMode(mode) {
   setModeUI(data.mode);
   answerEl.className = 'loading';
   const tips = {
-    'deepseek': '在线模式（DeepSeek，完整能力：天气/搜索/对话）',
-    'ollama': '本地模型模式（Ollama，免费离线对话）',
-    'offline': '纯检索模式（免费，仅本地文档检索）'
+    'deepseek': 'DeepSeek（完整能力：天气/搜索/对话）',
+    'openai': 'OpenAI',
+    'qwen': '通义千问',
+    'zhipu': '智谱 GLM',
+    'moonshot': 'Kimi',
+    'ollama': '本地模型（Ollama，免费离线对话）',
+    'offline': '纯检索（免费，仅本地文档检索）'
   };
   answerEl.textContent = '已切换到 ' + (tips[data.mode] || data.mode) + '，可以提问了';
 }
@@ -144,9 +155,13 @@ function setModeUI(mode) {
     b.classList.toggle('active', b.dataset.mode === mode);
   });
   const status = {
-    'deepseek': '当前：在线模式（DeepSeek，完整能力）',
-    'ollama': '当前：本地模型（Ollama，免费离线对话）',
-    'offline': '当前：纯检索（免费，仅本地文档）'
+    'deepseek': '当前：DeepSeek',
+    'openai': '当前：OpenAI',
+    'qwen': '当前：通义千问',
+    'zhipu': '当前：智谱 GLM',
+    'moonshot': '当前：Kimi',
+    'ollama': '当前：本地模型（Ollama）',
+    'offline': '当前：纯检索（免费）'
   };
   modeStatus.textContent = status[mode] || ('当前：' + mode);
 }

@@ -80,7 +80,7 @@ class _OfflineTools:
 def build_agent(mode: str | None = None):
     """构建通用 Agent。离线模式返回本地检索实现，在线模式用 ReAct Agent。
 
-    mode: 可选，显式指定模式（deepseek/openai/ollama/offline）；不传则用配置默认值。
+    mode: 可选，显式指定模式（deepseek/openai/qwen/zhipu/moonshot/ollama/offline）。
     支持运行时动态切换（如网页端按钮切换）。
     """
     provider = (mode or LLM_PROVIDER).lower()
@@ -99,16 +99,11 @@ def build_agent(mode: str | None = None):
         )
         return create_react_agent(model=model, tools=[search_documents, web_search, get_weather])
 
-    api_key = DEEPSEEK_API_KEY if provider == "deepseek" else None
-    base_url = LLM_BASE_URL or ("https://api.deepseek.com/v1" if provider == "deepseek" else None)
-
-    # 优先使用运行时配置（网页端可动态更换 Key）
+    # 在线模式：从 provider 配置统一获取（网页端可动态更换 Key）
     from config import get_provider_config
     pcfg = get_provider_config(provider)
-    if pcfg.get("api_key"):
-        api_key = pcfg["api_key"]
-    if pcfg.get("base_url"):
-        base_url = pcfg["base_url"]
+    api_key = pcfg.get("api_key") or "empty-key-placeholder"
+    base_url = pcfg.get("base_url") or "https://api.deepseek.com/v1"
     model_name = pcfg.get("model") or LLM_MODEL
 
     model = ChatOpenAI(

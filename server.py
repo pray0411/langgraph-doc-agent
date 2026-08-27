@@ -26,8 +26,12 @@ MAX_BODY = 10 * 1024
 # 单请求超时：60 秒（模型调用 + 工具调用可能较慢）
 REQUEST_TIMEOUT = 60
 
-# 有效模式
-VALID_MODES = ("deepseek", "openai", "ollama", "offline")
+# 有效在线模式（来自 config 的服务商预设 + ollama/offline）
+def _valid_modes() -> list[str]:
+    from config import PROVIDER_PRESETS
+    return list(PROVIDER_PRESETS.keys()) + ["ollama", "offline"]
+
+
 # 当前运行模式（默认读取 .env 的 LLM_PROVIDER，可通过 /api/mode 动态切换）
 _current_mode = None
 
@@ -42,7 +46,7 @@ def get_mode():
 
 
 def set_mode(mode: str):
-    """设置当前模式（deepseek / openai / offline）。"""
+    """设置当前模式。"""
     global _current_mode
     _current_mode = mode
 
@@ -62,10 +66,12 @@ def is_ollama_available() -> bool:
 
 
 def available_modes() -> list[str]:
-    """返回当前可用的模式列表（ollama 仅在本地服务可用时包含）。"""
-    modes = ["deepseek", "offline"]
+    """返回当前可用的模式列表（在线服务商 + ollama(可用时) + offline）。"""
+    from config import PROVIDER_PRESETS
+    modes = list(PROVIDER_PRESETS.keys())
     if is_ollama_available():
-        modes.insert(1, "ollama")
+        modes.append("ollama")
+    modes.append("offline")
     return modes
 
 
@@ -93,11 +99,25 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/ask":
             self._handle_ask()
+            return
+        self.send_error(404)
+
+    def _handle_set_mode(self):
+        length = int(self.headers.get("Content-Length", 0))
+        if length > MAX_BODY:
+            self._json({"error": "请求体过大"}, 413)
+            return
+        body = self.rfile.read(length).decode("utf-8", errors="replace")
+        data = parse_qs(body)
+        mode = (data.get("mode") or [""])[0].strip().lower()
+        if mode not in _valid_modes():
+            self._json({"error": f"无效模式: {mode}，可选 {'/'.join(_valid_modes())}"}, 400)
+            return
         set_mode(mode)
         self._json({"mode": get_mode(), "message": f"已切换到 {mode} 模式"})
 
     def _handle_set_config(self):
-        """网页端更换 API Key / 模型配置。"""
+        """网页端更换 API Key / 模型配置（支持所有预设服务商）。"""
         length = int(self.headers.get("Content-Length", 0))
         if length > MAX_BODY:
             self._json({"error": "请求体过大"}, 413)
@@ -109,8 +129,9 @@ class Handler(BaseHTTPRequestHandler):
         base_url = (data.get("base_url") or [""])[0].strip()
         model = (data.get("model") or [""])[0].strip()
 
-        if provider not in ("deepseek", "openai"):
-            self._json({"error": "provider 仅支持 deepseek/openai"}, 400)
+        from config import PROVIDER_PRESETS
+        if provider not in PROVIDER_PRESETS:
+            self._json({"error": f"provider 仅支持: {'/'.join(PROVIDER_PRESETS.keys())}"}, 400)
             return
         if not api_key:
             self._json({"error": "API Key 不能为空"}, 400)
@@ -125,8 +146,6 @@ class Handler(BaseHTTPRequestHandler):
                 "provider": provider,
             }
         )
-        set_mode(mode)
-        self._json({"mode": get_mode(), "message": f"已切换到 {mode} 模式"})
 
     def _handle_ask(self):
         # 请求体大小限制

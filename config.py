@@ -37,9 +37,38 @@ MIN_SCORE = float(os.getenv("MIN_SCORE", "0.05"))  # 检索最低相似度阈值
 
 INDEX_FILE = INDEX_DIR / "index.json"
 
-# ===== 运行时 API 配置（网页端可动态更换，不写入文件）=====
+# ===== 服务商预设（OpenAI 兼容接口）=====
+# 每个服务商: {default_base_url, default_model, api_key_env}
+PROVIDER_PRESETS = {
+    "deepseek": {
+        "default_base_url": "https://api.deepseek.com/v1",
+        "default_model": "deepseek-chat",
+        "api_key_env": "DEEPSEEK_API_KEY",
+    },
+    "openai": {
+        "default_base_url": "https://api.openai.com/v1",
+        "default_model": "gpt-4o-mini",
+        "api_key_env": "OPENAI_API_KEY",
+    },
+    "qwen": {  # 阿里通义千问
+        "default_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "default_model": "qwen-plus",
+        "api_key_env": "QWEN_API_KEY",
+    },
+    "zhipu": {  # 智谱 GLM
+        "default_base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "default_model": "glm-4-flash",
+        "api_key_env": "ZHIPU_API_KEY",
+    },
+    "moonshot": {  # Kimi
+        "default_base_url": "https://api.moonshot.cn/v1",
+        "default_model": "moonshot-v1-8k",
+        "api_key_env": "MOONSHOT_API_KEY",
+    },
+}
+
+# 运行时 API 配置（网页端可动态更换，不写入文件）
 # 结构: {provider: {"api_key": str, "base_url": str, "model": str}}
-# 未设置时回退到上方从 .env 读取的默认值
 _runtime_provider_config: dict = {}
 
 
@@ -53,15 +82,19 @@ def set_runtime_provider_config(provider: str, api_key: str, base_url: str = "",
 
 
 def get_provider_config(provider: str) -> dict:
-    """获取 provider 的有效配置（优先运行时设置，回退 .env 默认）。"""
+    """获取 provider 的有效配置（优先运行时设置，回退预设默认）。"""
     provider = provider.lower()
     # 运行时设置优先
     if provider in _runtime_provider_config:
         return _runtime_provider_config[provider]
 
-    # 回退到 .env 默认
-    if provider == "deepseek":
-        return {"api_key": DEEPSEEK_API_KEY, "base_url": LLM_BASE_URL or "https://api.deepseek.com/v1", "model": LLM_MODEL}
-    if provider == "openai":
-        return {"api_key": OPENAI_API_KEY, "base_url": LLM_BASE_URL or "https://api.openai.com/v1", "model": LLM_MODEL}
-    return {"api_key": "", "base_url": "", "model": ""}
+    # 回退到预设默认（从环境变量读 Key）
+    preset = PROVIDER_PRESETS.get(provider)
+    if not preset:
+        return {"api_key": "", "base_url": "", "model": ""}
+    env_key = os.getenv(preset["api_key_env"], "")
+    return {
+        "api_key": env_key,
+        "base_url": preset["default_base_url"],
+        "model": preset["default_model"],
+    }
