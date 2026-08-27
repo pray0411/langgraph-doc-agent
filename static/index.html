@@ -6,32 +6,32 @@
 <title>LangGraph 智能文档问答 Agent</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; color: #333; }
-  .container { max-width: 860px; margin: 0 auto; padding: 24px 16px 80px; }
-  header { text-align: center; padding: 24px 0 8px; }
-  header h1 { font-size: 24px; color: #1a1a2e; }
-  header p { color: #888; margin-top: 6px; font-size: 14px; }
-  .badge { display: inline-block; background: #eef2ff; color: #4f46e5; border-radius: 12px; padding: 2px 10px; font-size: 12px; margin-left: 8px; }
-  .input-area { display: flex; gap: 10px; margin: 20px 0 12px; }
-  #question { flex: 1; padding: 14px 16px; border: 1px solid #ddd; border-radius: 10px; font-size: 15px; outline: none; }
-  #question:focus { border-color: #4f46e5; }
-  #askBtn { padding: 14px 26px; background: #4f46e5; color: #fff; border: none; border-radius: 10px; font-size: 15px; cursor: pointer; }
-  #askBtn:disabled { background: #a5a5c9; cursor: not-allowed; }
-  .meta { font-size: 12px; color: #999; margin-bottom: 14px; }
-  .card { background: #fff; border-radius: 12px; padding: 18px; margin-bottom: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-  .card h3 { font-size: 14px; color: #4f46e5; margin-bottom: 10px; }
-  #answer { white-space: pre-wrap; line-height: 1.7; font-size: 15px; }
-  #log { list-style: none; }
-  #log li { padding: 6px 0; border-bottom: 1px dashed #eee; font-size: 13px; color: #555; font-family: Consolas, monospace; }
-  #reflection { white-space: pre-wrap; font-size: 13px; color: #555; font-family: Consolas, monospace; line-height: 1.6; }
+  body { font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background: linear-gradient(135deg, #f0f4ff 0%, #fdf2f8 100%); color: #333; min-height: 100vh; }
+  .container { max-width: 760px; margin: 0 auto; padding: 32px 20px 60px; }
+  header { text-align: center; padding: 20px 0 12px; }
+  header h1 { font-size: 26px; color: #1a1a2e; font-weight: 700; letter-spacing: .5px; }
+  header p { color: #8892a6; margin-top: 6px; font-size: 14px; }
+  .badge { display: inline-block; background: rgba(79,70,229,.1); color: #4f46e5; border-radius: 20px; padding: 3px 12px; font-size: 12px; margin-left: 8px; font-weight: 500; }
+  .mode-bar { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 22px 0 6px; font-size: 13px; color: #666; flex-wrap: wrap; }
+  #modeSelect { padding: 9px 14px; border: 1px solid #dde3ee; border-radius: 10px; font-size: 13px; background: #fff; cursor: pointer; outline: none; transition: border .2s; }
+  #modeSelect:focus { border-color: #4f46e5; }
+  .mode-btn { padding: 8px 16px; border: 1px solid #dde3ee; background: #fff; color: #5a6478; border-radius: 10px; font-size: 13px; cursor: pointer; transition: all .2s; }
+  .mode-btn:hover { border-color: #4f46e5; color: #4f46e5; background: #f8f9ff; }
+  .mode-status { font-size: 12px; color: #99a1b3; }
+  .input-area { display: flex; gap: 10px; margin: 18px 0 8px; }
+  #question { flex: 1; padding: 15px 18px; border: 1px solid #dde3ee; border-radius: 12px; font-size: 15px; outline: none; background: #fff; transition: border .2s, box-shadow .2s; }
+  #question:focus { border-color: #4f46e5; box-shadow: 0 0 0 3px rgba(79,70,229,.1); }
+  #askBtn { padding: 15px 30px; background: linear-gradient(135deg, #4f46e5, #7c3aed); color: #fff; border: none; border-radius: 12px; font-size: 15px; cursor: pointer; transition: opacity .2s; }
+  #askBtn:hover { opacity: .9; }
+  #askBtn:disabled { opacity: .5; cursor: not-allowed; }
+  .meta { font-size: 12px; color: #a0a8ba; margin-bottom: 18px; }
+  .card { background: #fff; border-radius: 16px; padding: 24px; box-shadow: 0 2px 12px rgba(26,26,46,.06); }
+  .card h3 { font-size: 13px; color: #4f46e5; margin-bottom: 14px; font-weight: 600; letter-spacing: .5px; }
+  #answer { white-space: pre-wrap; line-height: 1.8; font-size: 15px; color: #2d3340; }
   .loading { color: #4f46e5; font-size: 14px; }
   .error { color: #dc2626; }
-  .hint { font-size: 12px; color: #bbb; text-align: center; margin-top: 20px; }
-  .mode-bar { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 14px 0 4px; font-size: 13px; color: #666; }
-  .mode-btn { padding: 8px 18px; border: 2px solid #4f46e5; background: #fff; color: #4f46e5; border-radius: 20px; font-size: 13px; cursor: pointer; transition: all .2s; }
-  .mode-btn:hover { background: #eef2ff; }
-  .mode-btn.active { background: #4f46e5; color: #fff; }
-  .mode-status { font-size: 12px; color: #999; }
+  .hint { font-size: 12px; color: #b0b7c6; text-align: center; margin-top: 24px; }
+</style>
 </style>
 </head>
 <body>
@@ -64,8 +64,6 @@
 
   <div id="result">
     <div class="card"><h3>回答</h3><div id="answer" class="loading">等待提问…</div></div>
-    <div class="card"><h3>推理过程（Agent 执行日志）</h3><ul id="log"></ul></div>
-    <div class="card"><h3>反思记录</h3><div id="reflection">—</div></div>
   </div>
   <div class="hint">Powered by LangGraph · 双引擎搜索（博查 + DuckDuckGo）· 点击上方按钮切换模式或更换 API Key</div>
 </div>
@@ -108,8 +106,6 @@
 const input = document.getElementById('question');
 const btn = document.getElementById('askBtn');
 const answerEl = document.getElementById('answer');
-const logEl = document.getElementById('log');
-const refEl = document.getElementById('reflection');
 const modeSelect = document.getElementById('modeSelect');
 const modeStatus = document.getElementById('modeStatus');
 let currentMode = 'deepseek';
@@ -226,8 +222,6 @@ async function ask() {
   btn.disabled = true;
   answerEl.className = 'loading';
   answerEl.textContent = 'Agent 正在思考…';
-  logEl.innerHTML = '';
-  refEl.textContent = '—';
   try {
     const resp = await fetch('/ask', {
       method: 'POST',
@@ -238,12 +232,6 @@ async function ask() {
     if (data.error) { answerEl.className = 'error'; answerEl.textContent = data.error; return; }
     answerEl.className = '';
     answerEl.textContent = data.answer;
-    (data.log || []).forEach(m => {
-      const li = document.createElement('li');
-      li.textContent = m;
-      logEl.appendChild(li);
-    });
-    refEl.textContent = data.reflection || '—';
   } catch (err) {
     answerEl.className = 'error';
     answerEl.textContent = '请求失败: ' + err.message;
