@@ -4,6 +4,7 @@ GET  /             -> 问答页面
 GET  /health       -> 健康检查
 GET  /api/mode     -> 获取当前运行模式
 GET  /api/sessions -> 列出历史会话（thread_id/标题/时间）
+GET  /api/sessions/<thread_id>/messages -> 读取会话历史消息
 DELETE /api/sessions/<thread_id> -> 删除会话
 POST /api/mode     -> 切换运行模式（deepseek/openai/ollama，无需重启）
 POST /api/config   -> 运行时更换 API Key / 模型配置
@@ -63,11 +64,13 @@ def set_mode(mode: str):
 def is_ollama_available() -> bool:
     """检测本地 Ollama 服务是否可用（http://localhost:11434）。"""
     import socket
+    from urllib.parse import urlsplit
 
     try:
         from config import OLLAMA_BASE_URL
-        host = OLLAMA_BASE_URL.replace("http://", "").replace("https://", "").split(":")[0]
-        port = int(OLLAMA_BASE_URL.split(":")[-1].split("/")[0])
+        parts = urlsplit(OLLAMA_BASE_URL)
+        host = parts.hostname or "localhost"
+        port = parts.port or 11434
         with socket.create_connection((host, port), timeout=1):
             return True
     except Exception:  # noqa: BLE001
@@ -119,6 +122,17 @@ class Handler(BaseHTTPRequestHandler):
             if not self._auth_required():
                 return
             self._handle_list_sessions()
+        elif self.path.startswith("/api/sessions/") and self.path.endswith("/messages"):
+            if not self._auth_required():
+                return
+            # /api/sessions/<thread_id>/messages
+            prefix = "/api/sessions/"
+            suffix = "/messages"
+            thread_id = self.path[len(prefix):-len(suffix)]
+            if thread_id:
+                self._handle_session_messages(thread_id)
+                return
+            self.send_error(404)
         else:
             self.send_error(404)
 
@@ -309,6 +323,11 @@ class Handler(BaseHTTPRequestHandler):
         from graph import list_sessions
 
         self._json({"sessions": list_sessions()})
+
+    def _handle_session_messages(self, thread_id: str):
+        from graph import get_session_messages
+
+        self._json({"thread_id": thread_id, "messages": get_session_messages(thread_id)})
 
     def _handle_delete_session(self, thread_id: str):
         from graph import delete_session

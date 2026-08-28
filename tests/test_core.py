@@ -691,3 +691,94 @@ def test_ask_stream_yields_start_then_done(monkeypatch, tmp_path):
     assert tokens == "你好，我是Pray"
     done = events[-1]
     assert "reflection" in done and "sources" in done
+
+
+# ---------- 会话历史回放 ----------
+
+def test_get_session_messages_returns_history(monkeypatch, tmp_path):
+    """get_session_messages 应返回 human/ai 消息（跳过 tool），ai 带工具名。"""
+    import sqlite3
+
+    monkeypatch.setenv("MEMORY_DB", str(tmp_path / "mem3.sqlite"))
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.checkpoint.base import Checkpoint
+
+    conn = sqlite3.connect(tmp_path / "mem3.sqlite", check_same_thread=False)
+    saver = SqliteSaver(conn)
+    cp = Checkpoint(
+        v=1, ts="2026-01-01T00:00:00+00:00", id="cp-h",
+        channel_values={
+            "messages": [
+                {"type": "human", "content": "第一问"},
+                # tool 消息应被跳过
+                {"type": "tool", "content": "检索结果..."},
+                # 中间态 AI 消息（仅工具无文本）——工具名应合并进下一条 AI 回答
+                {"type": "ai", "content": "", "tool_calls": [{"name": "search_documents", "args": {}}]},
+                {"type": "ai", "content": "这是回答", "tool_calls": [{"name": "web_search", "args": {}}]},
+                {"type": "human", "content": "第二问"},
+                {"type": "ai", "content": "第二答"},
+            ]
+        },
+        channel_versions={}, versions_seen={}, updated_channels=[],
+    )
+    saver.put({"configurable": {"thread_id": "hist-1", "checkpoint_ns": "", "checkpoint_id": "1"}}, cp, {}, {})
+
+    import graph as graph_mod
+    monkeypatch.setattr(graph_mod, "get_memory", lambda: saver)
+
+    msgs = graph_mod.get_session_messages("hist-1")
+    assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant"]
+    assert msgs[0]["content"] == "第一问"
+    assert msgs[1]["content"] == "这是回答"
+    # 中间 AI 消息的 search_documents 应合并进有文本的 AI 消息（连同自身的 web_search）
+    assert msgs[1]["tools"] == ["search_documents", "web_search"]
+    assert msgs[3]["content"] == "第二答"
+    assert msgs[3]["tools"] == []
+
+
+def test_get_session_messages_unknown_thread(monkeypatch, tmp_path):
+    """不存在的 thread 应返回空列表。"""
+    import sqlite3
+
+    monkeypatch.setenv("MEMORY_DB", str(tmp_path / "mem4.sqlite"))
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    conn = sqlite3.connect(tmp_path / "mem4.sqlite", check_same_thread=False)
+    saver = SqliteSaver(conn)
+
+    import graph as graph_mod
+    monkeypatch.setattr(graph_mod, "get_memory", lambda: saver)
+
+    assert graph_mod.get_session_messages("no-such-thread") == []
+
+
+# ---------- Ollama URL 解析 ----------
+
+def test_is_ollama_available_parses_url(monkeypatch):
+    """is_ollama_available 应正确解析带路径/https 的 base_url（urlsplit 而非字符串切分）。"""
+    import config as config_mod
+    import socket
+    from server import is_ollama_available
+
+    calls = {}
+
+    def _fake_create_connection(addr, timeout=1):
+        calls["addr"] = addr
+        raise OSError("unreachable")
+
+    monkeypatch.setattr(socket, "create_connection", _fake_create_connection)
+
+    # 带路径的 URL（直接 patch config 模块属性，避免模块缓存）
+    monkeypatch.setattr(config_mod, "OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    assert is_ollama_available() is False
+    assert calls["addr"] == ("localhost", 11434)
+
+    # https URL
+    monkeypatch.setattr(config_mod, "OLLAMA_BASE_URL", "https://ollama.example.com:443/api")
+    is_ollama_available()
+    assert calls["addr"] == ("ollama.example.com", 443)
+
+    # 无端口默认
+    monkeypatch.setattr(config_mod, "OLLAMA_BASE_URL", "http://ollama.local/v1")
+    is_ollama_available()
+    assert calls["addr"] == ("ollama.local", 11434)

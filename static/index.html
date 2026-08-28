@@ -730,14 +730,67 @@ async function deleteSession(id) {
   } catch (e) {}
 }
 
+/* 加载并渲染历史会话消息 */
+function addHistoryMessage(role, content, tools) {
+  const welcome = document.getElementById('welcome');
+  if (welcome) welcome.remove();
+  const msg = document.createElement('div');
+  msg.className = 'msg ' + role;
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar';
+  avatar.textContent = role === 'user' ? '我' : '✦';
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+  const name = document.createElement('div');
+  name.className = 'msg-name';
+  name.textContent = role === 'user' ? '你' : 'Pray';
+  const bubble = document.createElement('div');
+  if (role === 'assistant') {
+    bubble.className = 'bubble md';
+    bubble.innerHTML = renderMarkdown(content);
+    // 工具调用标签
+    if (tools && tools.length) {
+      const tw = document.createElement('div');
+      tw.style.cssText = 'display:flex;flex-wrap:wrap;gap:5px;margin-top:8px;';
+      tw.innerHTML = tools.map(t => '<span class="tool-tag">' + esc(t) + '</span>').join('');
+      bubble.appendChild(tw);
+    }
+  } else {
+    bubble.className = 'bubble';
+    bubble.textContent = content;
+  }
+  body.appendChild(name);
+  body.appendChild(bubble);
+  msg.appendChild(avatar);
+  msg.appendChild(body);
+  chatInner.appendChild(msg);
+}
+
 function switchSession(id) {
   threadId = id;
-  // 会话标题即首条消息，作为欢迎语展示；当前版本不加载完整历史（服务端记忆在，续聊即可）
   chatInner.innerHTML = '';
-  const hint = document.createElement('div');
-  hint.className = 'welcome';
-  hint.innerHTML = '<div class="welcome-icon">✦</div><h2>继续会话</h2><p>「' + esc(sessionMap[id]?.title || '') + '」</p><p style="font-size:12px;color:var(--text-dim)">服务端保留此会话的全部上下文，直接提问即可续聊</p>';
-  chatInner.appendChild(hint);
+  // 加载历史消息回放
+  fetch('/api/sessions/' + encodeURIComponent(id) + '/messages', { headers: authHeaders({}) })
+    .then(resp => resp.ok ? resp.json() : null)
+    .then(data => {
+      chatInner.innerHTML = '';
+      const msgs = (data && data.messages) || [];
+      if (!msgs.length) {
+        const hint = document.createElement('div');
+        hint.className = 'welcome';
+        hint.innerHTML = '<div class="welcome-icon">✦</div><h2>空会话</h2><p>直接提问开始对话</p>';
+        chatInner.appendChild(hint);
+      } else {
+        msgs.forEach(m => addHistoryMessage(m.role === 'user' ? 'user' : 'assistant', m.content, m.tools));
+      }
+      scrollBottom();
+    })
+    .catch(() => {
+      const hint = document.createElement('div');
+      hint.className = 'welcome';
+      hint.innerHTML = '<div class="welcome-icon">✦</div><h2>加载失败</h2><p style="font-size:12px;color:var(--text-dim)">无法读取历史消息，直接提问可续聊</p>';
+      chatInner.appendChild(hint);
+    });
   renderSessions(id);
   if (window.innerWidth <= 768) appRoot.classList.add('sidebar-collapsed');
 }

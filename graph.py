@@ -444,6 +444,55 @@ def list_sessions(limit: int = 50) -> list[dict]:
     return sessions[:limit]
 
 
+def get_session_messages(thread_id: str, limit: int = 100) -> list[dict]:
+    """读取指定会话的历史消息（供前端回放）。
+
+    从 checkpointer 取该 thread 的最新 checkpoint，提取 human/ai 消息
+    （跳过 tool 消息）。中间态 AI 消息（仅 tool_calls 无文本）的工具名
+    合并进下一条有文本的 AI 消息，避免前端出现"空回答"气泡。
+    返回: [{"role": "user"|"assistant", "content": str, "tools": [str,...]}, ...]
+    """
+    saver = get_memory()
+    # 该 thread 的最新 checkpoint（list 返回最新在前）
+    latest = None
+    for t in saver.list(None):
+        tid = (t.config.get("configurable") or {}).get("thread_id", "")
+        if tid == thread_id:
+            latest = t
+            break
+    if latest is None:
+        return []
+
+    def _tools_of(m) -> list[str]:
+        if isinstance(m, dict):
+            tcs = m.get("tool_calls", []) or []
+        else:
+            tcs = getattr(m, "tool_calls", None) or []
+        return [tc.get("name") for tc in tcs if isinstance(tc, dict) and tc.get("name")]
+
+    messages = ((latest.checkpoint or {}).get("channel_values", {}) or {}).get("messages", []) or []
+    result: list[dict] = []
+    pending_tools: list[str] = []  # 待并入下一条 AI 消息的工具名
+    for m in messages:
+        mtype = _message_type(m)
+        content = _message_content(m).strip()
+        if mtype in ("human", "user"):
+            if content:
+                pending_tools = []
+                result.append({"role": "user", "content": content, "tools": []})
+        elif mtype in ("ai", "assistant"):
+            tools = _tools_of(m)
+            if content:
+                # 有文本：合并之前待并入的工具名，再重置
+                result.append({"role": "assistant", "content": content, "tools": pending_tools + tools})
+                pending_tools = []
+            elif tools:
+                # 仅调用工具无文本的中间消息：工具名挂起，等真正回答合并
+                pending_tools = pending_tools + tools
+        # tool 消息跳过（工具结果已反映在 AI 回答里）
+    return result[-limit:]
+
+
 def delete_session(thread_id: str) -> bool:
     """删除指定会话（checkpointer 的 thread）。"""
     saver = get_memory()
