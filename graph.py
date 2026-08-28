@@ -635,15 +635,23 @@ def get_session_messages(thread_id: str, limit: int = 100) -> list[dict]:
                 for call, res in zip(pending_tools, pending_results):
                     call["result"] = res
                 sources = _build_sources(all_tools) if all_tools else []
-                reflection = _build_reflection(
-                    current_question, content, all_tools, "history"
-                ) if all_tools else ""
+                # 历史回放无精确 usage（checkpoint 不含），按文本长度估算并标注
+                estimated_total = _estimate_tokens_from_text(content)
+                usage = {
+                    "prompt_tokens": None,
+                    "completion_tokens": estimated_total,
+                    "total_tokens": estimated_total,
+                    "estimated": True,
+                }
                 result.append({
                     "role": "assistant",
                     "content": content,
                     "tools": [t["name"] for t in all_tools],
                     "sources": sources,
-                    "reflection": reflection,
+                    # 无工具调用也生成 reflection，保证前端"过程详情"面板始终存在
+                    "reflection": _build_reflection(current_question, content, all_tools, "history"),
+                    "usage": usage,
+                    "cost": _estimate_cost("deepseek", usage),
                 })
                 pending_tools = []
                 pending_results = []

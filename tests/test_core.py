@@ -747,6 +747,11 @@ def test_get_session_messages_returns_history(monkeypatch, tmp_path):
     assert msgs[1]["tools"] == ["search_documents", "web_search"]
     assert msgs[3]["content"] == "第二答"
     assert msgs[3]["tools"] == []
+    # 每条 AI 回答必有 reflection + usage/cost（历史回放按文本估算，无工具也有面板）
+    for m in (msgs[1], msgs[3]):
+        assert m["reflection"], "AI 回答应始终有 reflection（保证面板渲染）"
+        assert m["usage"] and m["usage"]["total_tokens"] > 0
+        assert m["cost"] is not None
 
 
 def test_get_session_messages_unknown_thread(monkeypatch, tmp_path):

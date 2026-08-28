@@ -671,9 +671,18 @@ function renderReflection(reflectionJson, container, usage, cost) {
       : esc(usage.total_tokens + '');
     rows.push(['Token 用量' + est, detail + costText]);
   }
+  // Token 用量与成本（本次调用）
+  let usageSummary = '';
+  if (usage && usage.total_tokens) {
+    const est = usage.estimated ? '（估算）' : '';
+    const costText = cost && cost.total != null
+      ? ' ≈ ' + cost.currency + cost.total.toFixed(4)
+      : '';
+    usageSummary = ' · ' + usage.total_tokens + ' tokens' + est + costText;
+  }
   const detail = document.createElement('details');
   detail.className = 'reflection';
-  detail.innerHTML = '<summary>🔍 过程详情（' + tools.length + ' 次工具调用）</summary>';
+  detail.innerHTML = '<summary>🔍 过程详情' + usageSummary + '（' + tools.length + ' 次工具调用）</summary>';
   const body = document.createElement('div');
   body.className = 'reflection-body';
   let html = '<table>';
@@ -745,7 +754,7 @@ async function deleteSession(id) {
 }
 
 /* 加载并渲染历史会话消息 */
-function addHistoryMessage(role, content, tools, sources, reflection) {
+function addHistoryMessage(role, content, tools, sources, reflection, usage, cost) {
   const welcome = document.getElementById('welcome');
   if (welcome) welcome.remove();
   const msg = document.createElement('div');
@@ -795,7 +804,7 @@ function addHistoryMessage(role, content, tools, sources, reflection) {
   }
   // 反思面板（历史回放）
   if (reflection) {
-    renderReflection(reflection, body);
+    renderReflection(reflection, body, usage, cost);
   }
 
   msg.appendChild(avatar);
@@ -820,7 +829,7 @@ function switchSession(id) {
       } else {
         msgs.forEach(m => addHistoryMessage(
           m.role === 'user' ? 'user' : 'assistant',
-          m.content, m.tools, m.sources, m.reflection
+          m.content, m.tools, m.sources, m.reflection, m.usage, m.cost
         ));
       }
       scrollBottom();
