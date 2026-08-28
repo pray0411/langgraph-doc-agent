@@ -13,6 +13,7 @@ V2 说明：架构从 V1 的"规则路由 + 人工确认 + 反思"演进为 ReAc
 人工确认与反思改由模型在循环内自然处理（工具结果即观察）。对外保留 reflection
 字段供前端展示过程信息。
 """
+import re
 import threading
 from typing import TypedDict
 
@@ -30,6 +31,7 @@ class AgentResult(TypedDict, total=False):
     answer: str
     messages: list[str]
     reflection: str
+    sources: list[dict]  # 工具调用来源（文档片段/网页链接）
 
 
 # 全局记忆存储：SQLite checkpointer（按 thread_id 持久化多轮会话，重启不丢）。
@@ -171,7 +173,133 @@ def ask(
     if show_log:
         for line in log:
             print(line)
-    return answer, {"answer": answer, "messages": log, "reflection": reflection}
+    return answer, {
+        "answer": answer,
+        "messages": log,
+        "reflection": reflection,
+        "sources": _build_sources(tool_calls),
+    }
+
+
+def ask_stream(
+    question: str,
+    mode: str | None = None,
+    thread_id: str | None = None,
+):
+    """流式问答入口：生成器，逐 token yield 事件，供 SSE 推送。
+
+    事件类型：
+      {"type": "start"}                        — 开始
+      {"type": "token", "content": str}        — 回答文本增量
+      {"type": "tool_start", "name": str}      — 工具开始执行
+      {"type": "tool_done", "result": str}     — 工具返回（前 200 字符）
+      {"type": "done", "answer, reflection, sources"} — 完成（含最终完整信息）
+      {"type": "error", "message": str}        — 出错
+
+    说明：LangGraph stream_mode="messages" 提供 token 级增量；
+    结束后用 agent.get_state() 取完整消息生成 reflection/sources（需 thread_id）。
+    """
+    agent = build_agent(mode)
+
+    messages_in = [{"role": "user", "content": question}]
+    config = None
+    if thread_id:
+        config = {"configurable": {"thread_id": thread_id}}
+
+    yield {"type": "start", "mode": mode or LLM_PROVIDER}
+
+    text_parts: list[str] = []
+    seen_tools: set[str] = set()
+    try:
+        for msg_chunk, metadata in agent.stream(
+            {"messages": messages_in}, config=config, stream_mode="messages"
+        ):
+            node = metadata.get("langgraph_node", "")
+            if node == "agent":
+                content = getattr(msg_chunk, "content", None)
+                if isinstance(content, str) and content:
+                    text_parts.append(content)
+                    yield {"type": "token", "content": content}
+                # 工具调用开始（tool_call_chunks 出现在 agent 的 AIMessage 增量里）
+                for tcc in getattr(msg_chunk, "tool_call_chunks", None) or []:
+                    name = tcc.get("name")
+                    if name and name not in seen_tools:
+                        seen_tools.add(name)
+                        yield {"type": "tool_start", "name": name}
+            elif node == "tools":
+                # 工具结果消息（ToolMessage）——回传摘要供前端展示
+                content = getattr(msg_chunk, "content", None)
+                if isinstance(content, str) and content:
+                    yield {"type": "tool_done", "result": content[:200]}
+    except Exception as exc:  # noqa: BLE001
+        yield {"type": "error", "message": str(exc)}
+        return
+
+    # 结束：取完整消息生成 reflection/sources
+    messages = []
+    if thread_id:
+        try:
+            state = agent.get_state(config)
+            messages = list(state.values.get("messages", []))
+        except Exception:  # noqa: BLE001
+            messages = []
+
+    answer = "".join(text_parts)
+    tool_calls = _extract_tool_calls(messages)
+    reflection = _build_reflection(question, answer, tool_calls, mode or LLM_PROVIDER)
+    yield {
+        "type": "done",
+        "answer": answer,
+        "reflection": reflection,
+        "sources": _build_sources(tool_calls),
+    }
+
+
+def _build_sources(tool_calls: list[dict]) -> list[dict]:
+    """从工具调用结果中提取来源（文档片段 / 网页链接），供前端引用卡片展示。
+
+    返回: [{"type": "document"|"web", "title": str, "preview"/"url": str, ...}, ...]
+    """
+    sources: list[dict] = []
+    for call in tool_calls:
+        name = call.get("name")
+        result = str(call.get("result", ""))
+        if name == "search_documents":
+            # 结果格式: "[1] 来源: <path> | 相关度: 0.5\n<chunk>"
+            for line in result.split("\n"):
+                if "来源:" in line:
+                    title = line.split("来源:", 1)[1].split("|", 1)[0].strip()
+                    sources.append({
+                        "type": "document",
+                        "title": title,
+                        "preview": result[:300],
+                    })
+                    break
+        elif name == "web_search":
+            # 结果格式: "[1] <title>\n   摘要: ...\n   链接: <url>"
+            blocks = re.split(r"\[\d+\]", result)
+            for block in blocks[1:]:
+                lines = [ln.strip() for ln in block.strip().splitlines() if ln.strip()]
+                title = lines[0] if lines else ""
+                url = ""
+                for ln in lines:
+                    if ln.startswith("链接:"):
+                        url = ln.split("链接:", 1)[1].strip()
+                        break
+                if url:
+                    sources.append({"type": "web", "title": title, "url": url})
+    # 去重：web 按 URL、document 按 title；最多 5 条
+    seen = set()
+    deduped = []
+    for s in sources:
+        if s["type"] == "web":
+            key = ("web", s.get("url", ""))
+        else:
+            key = ("doc", s.get("title", ""))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(s)
+    return deduped[:5]
 
 
 def _extract_tool_calls(messages: list) -> list[dict]:
@@ -257,3 +385,67 @@ def _build_reflection(question: str, answer: str, tool_calls: list[dict], mode: 
         "说明": "工具调用取自 AIMessage.tool_calls 元数据；grounded 基于回答对工具结果连续片段的复用检查",
     }
     return _json.dumps(reflection, ensure_ascii=False, indent=2)
+
+
+# ---------- 会话管理（从 checkpointer 读取/删除） ----------
+
+def _message_content(m) -> str:
+    """兼容 dict 与 BaseMessage 提取文本内容。"""
+    if isinstance(m, dict):
+        content = m.get("content", "")
+        return str(content) if isinstance(content, str) else ""
+    return str(getattr(m, "content", "") or "")
+
+
+def _message_type(m) -> str:
+    if isinstance(m, dict):
+        return m.get("type", "") or m.get("role", "")
+    return getattr(m, "type", "")
+
+
+def list_sessions(limit: int = 50) -> list[dict]:
+    """列出最近会话（按最新活动排序）。
+
+    从 checkpointer 读取每个 thread 的最新 checkpoint，
+    用第一条用户消息作标题、checkpoint 的 ts 字段作更新时间。
+    返回: [{"thread_id", "title", "updated_at", "message_count"}, ...]
+    """
+    saver = get_memory()
+    # list(None) 返回全部 thread 的所有历史 checkpoint，顺序为最新在前；
+    # 用 setdefault 保留每个 thread 的第一条（即最新）checkpoint
+    latest: dict[str, object] = {}
+    for t in saver.list(None):
+        thread_id = (t.config.get("configurable") or {}).get("thread_id", "")
+        if not thread_id:
+            continue
+        latest.setdefault(thread_id, t)
+
+    sessions = []
+    for thread_id, t in latest.items():
+        cp = t.checkpoint or {}
+        cv = cp.get("channel_values", {})
+        messages = cv.get("messages", []) or []
+        title = "(空会话)"
+        for m in messages:
+            if _message_type(m) in ("human", "user") and _message_content(m).strip():
+                title = _message_content(m).strip()[:40]
+                break
+        # ts 是 ISO 时间戳（如 2026-08-28T18:09:37.123456+00:00）
+        updated_at = str(cp.get("ts", ""))[:19]
+        sessions.append({
+            "thread_id": thread_id,
+            "title": title,
+            "updated_at": updated_at,
+            "message_count": len(messages),
+        })
+
+    # 按更新时间倒序（ISO 时间戳字符串可比较）
+    sessions.sort(key=lambda s: s["updated_at"], reverse=True)
+    return sessions[:limit]
+
+
+def delete_session(thread_id: str) -> bool:
+    """删除指定会话（checkpointer 的 thread）。"""
+    saver = get_memory()
+    saver.delete_thread(thread_id)  # SqliteSaver.delete_thread 直接收 thread_id 字符串
+    return True

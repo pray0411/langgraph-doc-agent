@@ -542,3 +542,152 @@ def test_http_auth_401_without_token(monkeypatch, tmp_path):
         assert status2 == 200
     finally:
         srv.shutdown()
+
+
+# ---------- 来源提取（sources） ----------
+
+def test_build_sources_document():
+    """应从 search_documents 结果提取文档来源。"""
+    from graph import _build_sources
+
+    calls = [{
+        "name": "search_documents",
+        "result": "以下为检索到的文档片段：\n[1] 来源: docs/a.md | 相关度: 0.5\n核心架构是分层设计",
+    }]
+    sources = _build_sources(calls)
+    assert len(sources) == 1
+    assert sources[0]["type"] == "document"
+    assert sources[0]["title"] == "docs/a.md"
+    assert "分层设计" in sources[0]["preview"]
+
+
+def test_build_sources_web():
+    """应从 web_search 结果提取网页链接（含去重与上限）。"""
+    from graph import _build_sources
+
+    calls = [{
+        "name": "web_search",
+        "result": (
+            "以下为搜索到的网页结果：\n"
+            "[1] AI 新闻\n   摘要: x\n   链接: https://a.example.com\n"
+            "[2] 另一条\n   摘要: y\n   链接: https://b.example.com\n"
+            "[3] 重复\n   摘要: z\n   链接: https://a.example.com"
+        ),
+    }]
+    sources = _build_sources(calls)
+    urls = [s["url"] for s in sources]
+    assert urls == ["https://a.example.com", "https://b.example.com"]  # 去重
+    assert all(s["type"] == "web" for s in sources)
+
+
+def test_build_sources_empty():
+    """无工具调用/无结果时返回空列表。"""
+    from graph import _build_sources
+
+    assert _build_sources([]) == []
+    assert _build_sources([{"name": "get_weather", "result": "晴 25°C"}]) == []
+
+
+# ---------- 会话管理（sessions API） ----------
+
+def test_list_sessions_returns_latest_per_thread(monkeypatch, tmp_path):
+    """list_sessions 应返回每个 thread 的最新状态（含标题与消息数）。"""
+    import sqlite3
+
+    monkeypatch.setenv("MEMORY_DB", str(tmp_path / "mem.sqlite"))
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.checkpoint.base import Checkpoint
+
+    conn = sqlite3.connect(tmp_path / "mem.sqlite", check_same_thread=False)
+    saver = SqliteSaver(conn)
+
+    # 造两个 thread 的 checkpoint
+    def make_checkpoint(thread_id, messages, ts):
+        return Checkpoint(
+            v=1,
+            ts=ts,
+            id=f"cp-{thread_id}-{ts}",
+            channel_values={"messages": messages},
+            channel_versions={},
+            versions_seen={},
+            updated_channels=[],
+        )
+
+    config1 = {"configurable": {"thread_id": "t1", "checkpoint_ns": "", "checkpoint_id": "1"}}
+    config2 = {"configurable": {"thread_id": "t2", "checkpoint_ns": "", "checkpoint_id": "1"}}
+    saver.put(config1, make_checkpoint("t1", [{"type": "human", "content": "第一问"}], "2026-01-01T00:00:00+00:00"), {}, {})
+    saver.put(config2, make_checkpoint("t2", [{"type": "human", "content": "第二问"}, {"type": "ai", "content": "答"}], "2026-01-02T00:00:00+00:00"), {}, {})
+
+    # 注入到 graph 的 get_memory
+    import graph as graph_mod
+    monkeypatch.setattr(graph_mod, "get_memory", lambda: saver)
+
+    sessions = graph_mod.list_sessions()
+    titles = {s["thread_id"]: s["title"] for s in sessions}
+    assert titles["t1"] == "第一问"
+    assert titles["t2"] == "第二问"
+    by_id = {s["thread_id"]: s for s in sessions}
+    assert by_id["t1"]["message_count"] == 1
+    assert by_id["t2"]["message_count"] == 2
+    # 按时间倒序：t2 更新
+    assert sessions[0]["thread_id"] == "t2"
+
+
+def test_delete_session_removes_thread(monkeypatch, tmp_path):
+    """delete_session 应移除 checkpointer 中的整个 thread。"""
+    import sqlite3
+
+    monkeypatch.setenv("MEMORY_DB", str(tmp_path / "mem2.sqlite"))
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.checkpoint.base import Checkpoint
+
+    conn = sqlite3.connect(tmp_path / "mem2.sqlite", check_same_thread=False)
+    saver = SqliteSaver(conn)
+    cp = Checkpoint(
+        v=1, ts="2026-01-01T00:00:00+00:00", id="cp-x",
+        channel_values={"messages": [{"type": "human", "content": "hi"}]},
+        channel_versions={}, versions_seen={}, updated_channels=[],
+    )
+    saver.put({"configurable": {"thread_id": "del-me", "checkpoint_ns": "", "checkpoint_id": "1"}}, cp, {}, {})
+
+    import graph as graph_mod
+    monkeypatch.setattr(graph_mod, "get_memory", lambda: saver)
+
+    assert any(s["thread_id"] == "del-me" for s in graph_mod.list_sessions())
+    graph_mod.delete_session("del-me")
+    assert not any(s["thread_id"] == "del-me" for s in graph_mod.list_sessions())
+
+
+# ---------- 流式（ask_stream 事件结构） ----------
+
+def test_ask_stream_yields_start_then_done(monkeypatch, tmp_path):
+    """ask_stream 应 yield start 事件并以 done 事件结束（含 sources）。"""
+    import graph as graph_mod
+
+    class FakeAgent:
+        def stream(self, *args, **kwargs):
+            # 模拟 LangGraph messages 模式的 token 流
+            class Chunk:
+                def __init__(self, content="", tccs=None):
+                    self.content = content
+                    self.tool_call_chunks = tccs or []
+
+            yield Chunk("你好"), {"langgraph_node": "agent"}
+            yield Chunk("，我是"), {"langgraph_node": "agent"}
+            yield Chunk("Pray"), {"langgraph_node": "agent"}
+
+        def get_state(self, config):
+            class State:
+                values = {"messages": []}
+            return State()
+
+    monkeypatch.setattr(graph_mod, "build_agent", lambda mode=None, memory=None: FakeAgent())
+
+    events = list(graph_mod.ask_stream("你好", mode="deepseek", thread_id="t1"))
+    types = [e["type"] for e in events]
+    assert types[0] == "start"
+    assert types[-1] == "done"
+    tokens = "".join(e.get("content", "") for e in events if e["type"] == "token")
+    assert tokens == "你好，我是Pray"
+    done = events[-1]
+    assert "reflection" in done and "sources" in done

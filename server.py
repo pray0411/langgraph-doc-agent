@@ -3,8 +3,12 @@
 GET  /             -> 问答页面
 GET  /health       -> 健康检查
 GET  /api/mode     -> 获取当前运行模式
+GET  /api/sessions -> 列出历史会话（thread_id/标题/时间）
+DELETE /api/sessions/<thread_id> -> 删除会话
 POST /api/mode     -> 切换运行模式（deepseek/openai/ollama，无需重启）
-POST /ask          -> {question, thread_id?} 返回 {answer, log, reflection, thread_id}
+POST /api/config   -> 运行时更换 API Key / 模型配置
+POST /ask          -> {question, thread_id?} 返回 {answer, log, reflection, sources, thread_id}
+POST /ask/stream   -> SSE 流式问答（token 增量 + 工具状态 + 最终 sources）
 
 加固措施：
 - 请求体大小限制（MAX_BODY，防止超大请求）
@@ -111,8 +115,24 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"status": "ok"})
         elif self.path == "/api/mode":
             self._json({"mode": get_mode(), "available_modes": available_modes()})
+        elif self.path == "/api/sessions":
+            if not self._auth_required():
+                return
+            self._handle_list_sessions()
         else:
             self.send_error(404)
+
+    def do_DELETE(self):  # noqa: N802
+        if not self._auth_required():
+            return
+        # 形如 /api/sessions/<thread_id>
+        prefix = "/api/sessions/"
+        if self.path.startswith(prefix):
+            thread_id = self.path[len(prefix):]
+            if thread_id:
+                self._handle_delete_session(thread_id)
+                return
+        self.send_error(404)
 
     def do_POST(self):  # noqa: N802
         if self.path == "/api/mode":
@@ -129,6 +149,11 @@ class Handler(BaseHTTPRequestHandler):
             if not self._auth_required():
                 return
             self._handle_ask()
+            return
+        if self.path == "/ask/stream":
+            if not self._auth_required():
+                return
+            self._handle_ask_stream()
             return
         self.send_error(404)
 
@@ -235,10 +260,61 @@ class Handler(BaseHTTPRequestHandler):
                 "answer": answer,
                 "log": result.get("messages", []),
                 "reflection": result.get("reflection", ""),
+                "sources": result.get("sources", []),
                 "thread_id": thread_id,
                 "is_new_thread": is_new_thread,
             }
         )
+
+    def _handle_ask_stream(self):
+        """SSE 流式问答：逐 token 推送回答，含工具调用状态与最终来源。"""
+        length = int(self.headers.get("Content-Length", 0))
+        if length > MAX_BODY:
+            self._json({"error": "请求体过大"}, 413)
+            return
+
+        body = self.rfile.read(length).decode("utf-8", errors="replace")
+        data = parse_qs(body)
+        question = (data.get("question") or [""])[0].strip()
+        if not question:
+            self._json({"error": "问题不能为空"}, 400)
+            return
+
+        thread_id = (data.get("thread_id") or [""])[0].strip()
+        if not thread_id:
+            thread_id = uuid.uuid4().hex
+
+        # SSE 响应头
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        def sse(event: dict):
+            self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"))
+            self.wfile.flush()
+
+        try:
+            from graph import ask_stream
+
+            for event in ask_stream(question, mode=get_mode(), thread_id=thread_id):
+                sse(event)
+            # 末尾补 thread_id（前端需要它续会话）
+            sse({"type": "meta", "thread_id": thread_id})
+        except Exception:  # noqa: BLE001
+            sse({"type": "error", "message": "服务内部错误"})
+
+    def _handle_list_sessions(self):
+        from graph import list_sessions
+
+        self._json({"sessions": list_sessions()})
+
+    def _handle_delete_session(self, thread_id: str):
+        from graph import delete_session
+
+        delete_session(thread_id)
+        self._json({"ok": True, "thread_id": thread_id})
 
     def _json(self, obj, code=200):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
