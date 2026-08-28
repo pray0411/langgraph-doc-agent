@@ -771,13 +771,7 @@ function addHistoryMessage(role, content, tools, sources, reflection, usage, cos
   if (role === 'assistant') {
     bubble.className = 'bubble md';
     bubble.innerHTML = renderMarkdown(content);
-    // 工具调用标签
-    if (tools && tools.length) {
-      const tw = document.createElement('div');
-      tw.style.cssText = 'display:flex;flex-wrap:wrap;gap:5px;margin-top:8px;';
-      tw.innerHTML = tools.map(t => '<span class="tool-tag">' + esc(t) + '</span>').join('');
-      bubble.appendChild(tw);
-    }
+    // 工具调用信息不渲染进气泡（已由下方"过程详情"面板展示）
   } else {
     bubble.className = 'bubble';
     bubble.textContent = content;
