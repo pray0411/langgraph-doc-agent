@@ -163,12 +163,27 @@
   .tool-chip { display: inline-flex; align-items: center; gap: 5px; background: var(--bg-hover); border: 1px solid var(--border); padding: 3px 9px; border-radius: 999px; font-size: 12px; color: var(--text); margin: 2px 4px 2px 0; }
 
   /* ===== 来源卡片 ===== */
-  .sources { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-  .source-card { display: flex; align-items: center; gap: 8px; max-width: 320px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; background: var(--bg-input); font-size: 12.5px; cursor: pointer; transition: all .15s; text-decoration: none; color: var(--text); }
+  .sources { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }  .source-card { display: flex; align-items: center; gap: 8px; max-width: 320px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; background: var(--bg-input); font-size: 12.5px; cursor: pointer; transition: all .15s; text-decoration: none; color: var(--text); }
   .source-card:hover { border-color: var(--accent); }
   .source-icon { font-size: 15px; flex-shrink: 0; }
   .source-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .source-preview { font-size: 11.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+
+  /* ===== 反思面板（过程详情） ===== */
+  .reflection { margin-top: 10px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--bg-input); }
+  .reflection summary { padding: 8px 14px; font-size: 12.5px; color: var(--text-dim); cursor: pointer; user-select: none; list-style: none; display: flex; align-items: center; gap: 6px; }
+  .reflection summary::-webkit-details-marker { display: none; }
+  .reflection summary:hover { color: var(--text); }
+  .reflection summary::before { content: '▸'; transition: transform .15s; }
+  .reflection[open] summary::before { transform: rotate(90deg); }
+  .reflection-body { padding: 10px 14px 12px; border-top: 1px solid var(--border); font-size: 12.5px; }
+  .reflection-body table { border-collapse: collapse; width: 100%; }
+  .reflection-body td { padding: 4px 8px 4px 0; vertical-align: top; }
+  .reflection-body td:first-child { color: var(--text-dim); white-space: nowrap; width: 1%; }
+  .reflection-body .tools { display: flex; flex-wrap: wrap; gap: 5px; }
+  .reflection-body .tool-tag { background: var(--bg-hover); border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; font-size: 11.5px; color: var(--text); }
+  .reflection-body .ok { color: var(--accent); }
+  .reflection-body .no { color: var(--text-dim); }
 
   /* ===== 消息操作 ===== */
   .msg-actions { display: flex; gap: 4px; opacity: 0; transition: opacity .15s; }
@@ -626,6 +641,44 @@ function removeToolStatus() {
   if (t) t.remove();
 }
 
+/* ===== 反思面板（过程详情，可折叠） ===== */
+function renderReflection(reflectionJson, container) {
+  let ref;
+  try { ref = JSON.parse(reflectionJson); } catch (e) { return; }
+  if (!ref || typeof ref !== 'object') return;
+
+  const tools = Array.isArray(ref['调用的工具']) ? ref['调用的工具'] : [];
+  const rows = [
+    ['运行模式', esc(ref['运行模式'] || '')],
+    ['工具调用', tools.length ? '' : '无'],
+    ['文档检索', ref['使用文档检索'] ? '<span class="ok">✓ 使用</span>' : '<span class="no">未使用</span>'],
+    ['联网搜索', ref['使用联网搜索'] ? '<span class="ok">✓ 使用</span>' : '<span class="no">未使用</span>'],
+    ['天气查询', ref['使用天气查询'] ? '<span class="ok">✓ 使用</span>' : '<span class="no">未使用</span>'],
+    ['回答基于工具结果', ref['回答是否基于工具结果'] ? '<span class="ok">✓ 是</span>' : '<span class="no">否</span>'],
+    ['回答长度', esc(String(ref['回答长度'] ?? ''))],
+  ];
+  const detail = document.createElement('details');
+  detail.className = 'reflection';
+  detail.innerHTML = '<summary>🔍 过程详情（' + tools.length + ' 次工具调用）</summary>';
+  const body = document.createElement('div');
+  body.className = 'reflection-body';
+  let html = '<table>';
+  for (const [k, v] of rows) {
+    html += '<tr><td>' + k + '</td><td>';
+    if (k === '工具调用' && tools.length) {
+      html += '<div class="tools">' + tools.map(t => '<span class="tool-tag">' + esc(t) + '</span>').join('') + '</div>';
+    } else {
+      html += v;
+    }
+    html += '</td></tr>';
+  }
+  html += '</table>';
+  body.innerHTML = html;
+  detail.appendChild(body);
+  container.appendChild(detail);
+  scrollBottom();
+}
+
 /* ===== 会话管理 ===== */
 function renderSessions(activeId) {
   const ids = Object.keys(sessionMap).sort((a, b) => (sessionMap[b].updated_at || '').localeCompare(sessionMap[a].updated_at || ''));
@@ -755,6 +808,7 @@ async function ask() {
   bubble.innerHTML = '';
   let answer = '';
   let sources = [];
+  let reflection = '';
   let sawToken = false;
 
   try {
@@ -794,6 +848,7 @@ async function ask() {
         } else if (ev.type === 'done') {
           if (ev.answer) { answer = ev.answer; bubble.innerHTML = renderMarkdown(answer); }
           if (ev.sources) sources = ev.sources;
+          if (ev.reflection) reflection = ev.reflection;
         } else if (ev.type === 'meta') {
           threadId = ev.thread_id || threadId;
         } else if (ev.type === 'error') {
@@ -822,6 +877,11 @@ async function ask() {
         srcWrap.appendChild(a);
       });
       bubble.parentNode.appendChild(srcWrap);
+    }
+
+    // 渲染反思面板（过程详情，可折叠）
+    if (reflection) {
+      renderReflection(reflection, bubble.parentNode);
     }
 
     // 更新会话列表（本会话可能新增）
