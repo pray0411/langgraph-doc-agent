@@ -665,23 +665,34 @@ def test_ask_stream_yields_start_then_done(monkeypatch, tmp_path):
     import graph as graph_mod
 
     class FakeAgent:
+        def __init__(self):
+            pass
+
         def stream(self, *args, **kwargs):
-            # 模拟 LangGraph messages 模式的 token 流
+            # 模拟 LangGraph 双流模式：("messages", (chunk, meta)) 与 ("updates", {...})
             class Chunk:
                 def __init__(self, content="", tccs=None):
                     self.content = content
                     self.tool_call_chunks = tccs or []
 
-            yield Chunk("你好"), {"langgraph_node": "agent"}
-            yield Chunk("，我是"), {"langgraph_node": "agent"}
-            yield Chunk("Pray"), {"langgraph_node": "agent"}
+            # messages 流：token 增量
+            yield ("messages", (Chunk("你好"), {"langgraph_node": "agent"}))
+            yield ("messages", (Chunk("，我是"), {"langgraph_node": "agent"}))
+            yield ("messages", (Chunk("Pray"), {"langgraph_node": "agent"}))
+            # updates 流：完整消息（供 usage/tool_calls 提取）
+            yield ("updates", {"agent": {"messages": [{"type": "ai", "content": "你好，我是Pray"}]}})
 
         def get_state(self, config):
             class State:
                 values = {"messages": []}
             return State()
 
-    monkeypatch.setattr(graph_mod, "build_agent", lambda mode=None, memory=None: FakeAgent())
+    fake = FakeAgent()
+    # 外部动态赋值（避免类内 __ 名称改写），模拟真实 build_agent 挂 handler
+    class Handler:
+        usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    fake.__usage_handler = Handler()
+    monkeypatch.setattr(graph_mod, "build_agent", lambda mode=None, memory=None: fake)
 
     events = list(graph_mod.ask_stream("你好", mode="deepseek", thread_id="t1"))
     types = [e["type"] for e in events]
@@ -691,6 +702,8 @@ def test_ask_stream_yields_start_then_done(monkeypatch, tmp_path):
     assert tokens == "你好，我是Pray"
     done = events[-1]
     assert "reflection" in done and "sources" in done
+    assert done["usage"] == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    assert "cost" in done
 
 
 # ---------- 会话历史回放 ----------
@@ -782,3 +795,127 @@ def test_is_ollama_available_parses_url(monkeypatch):
     monkeypatch.setattr(config_mod, "OLLAMA_BASE_URL", "http://ollama.local/v1")
     is_ollama_available()
     assert calls["addr"] == ("ollama.local", 11434)
+
+
+# ---------- Token 用量与成本 ----------
+
+def test_extract_usage_from_ai_messages():
+    """应从 AI 消息的 response_metadata.usage 提取 token 用量。"""
+    from graph import _extract_usage
+
+    class FakeAIMessage:
+        type = "ai"
+        content = "hi"
+
+        def __init__(self, usage):
+            self.response_metadata = {"usage": usage} if usage else {}
+
+    msgs = [
+        FakeAIMessage({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}),
+    ]
+    usage = _extract_usage(msgs)
+    assert usage == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+
+
+def test_extract_usage_supports_token_usage_field():
+    """应兼容 DeepSeek 的 token_usage 字段名（非标准 usage）。"""
+    from graph import _extract_usage
+
+    class FakeAIMessage:
+        type = "ai"
+        content = "hi"
+        response_metadata = {
+            "token_usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+        }
+
+    usage = _extract_usage([FakeAIMessage()])
+    assert usage == {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+
+
+def test_extract_usage_none_when_missing():
+    """无 usage 元数据时应返回 None。"""
+    from graph import _extract_usage
+
+    class FakeAIMessage:
+        type = "ai"
+        content = "hi"
+        response_metadata = {}
+
+    assert _extract_usage([FakeAIMessage()]) is None
+    assert _extract_usage([]) is None
+
+
+def test_estimate_cost_deepseek():
+    """deepseek 单价应能估算成本。"""
+    from graph import _estimate_cost
+
+    cost = _estimate_cost("deepseek", {"prompt_tokens": 1_000_000, "completion_tokens": 500_000})
+    assert cost is not None
+    assert cost["input"] == 2.0   # 100 万输入 token × ¥2/M
+    assert cost["output"] == 4.0  # 50 万输出 token × ¥8/M
+    assert cost["total"] == 6.0
+    assert cost["currency"] == "¥"
+
+
+def test_estimate_cost_unknown_provider():
+    """未知 provider 或无 usage 时应返回 None。"""
+    from graph import _estimate_cost
+
+    assert _estimate_cost("unknown-provider", {"prompt_tokens": 1, "completion_tokens": 1}) is None
+    assert _estimate_cost("deepseek", None) is None
+
+
+def test_estimate_cost_with_none_fields():
+    """流式估算的 usage（prompt_tokens 为 None）应能正常估算（按 0 处理）。"""
+    from graph import _estimate_cost
+
+    cost = _estimate_cost("deepseek", {"prompt_tokens": None, "completion_tokens": 1000, "total_tokens": 1000})
+    assert cost is not None
+    assert cost["input"] == 0.0
+    assert cost["output"] == 0.008  # 1000 tokens × ¥8/M
+    assert cost["total"] == 0.008
+
+
+# ---------- 历史回放 sources/reflection 生成 ----------
+
+def test_get_session_messages_generates_sources(monkeypatch, tmp_path):
+    """历史回放应基于工具结果生成 sources 与 reflection。"""
+    import sqlite3
+
+    monkeypatch.setenv("MEMORY_DB", str(tmp_path / "mem5.sqlite"))
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.checkpoint.base import Checkpoint
+
+    conn = sqlite3.connect(tmp_path / "mem5.sqlite", check_same_thread=False)
+    saver = SqliteSaver(conn)
+    cp = Checkpoint(
+        v=1, ts="2026-01-01T00:00:00+00:00", id="cp-s",
+        channel_values={
+            "messages": [
+                {"type": "human", "content": "项目用什么语言？"},
+                {"type": "ai", "content": "", "tool_calls": [{"name": "search_documents", "args": {"query": "语言"}}]},
+                {"type": "tool", "content": "以下为检索到的文档片段：\n[1] 来源: docs/a.md | 相关度: 0.5\nPython 3.10"},
+                {"type": "ai", "content": "项目用 **Python 3.10**。"},
+            ]
+        },
+        channel_versions={}, versions_seen={}, updated_channels=[],
+    )
+    saver.put({"configurable": {"thread_id": "src-1", "checkpoint_ns": "", "checkpoint_id": "1"}}, cp, {}, {})
+
+    import graph as graph_mod
+    monkeypatch.setattr(graph_mod, "get_memory", lambda: saver)
+
+    msgs = graph_mod.get_session_messages("src-1")
+    assert len(msgs) == 2
+    assistant = msgs[1]
+    assert assistant["role"] == "assistant"
+    assert assistant["tools"] == ["search_documents"]
+    # sources 已生成
+    assert len(assistant["sources"]) == 1
+    assert assistant["sources"][0]["type"] == "document"
+    assert assistant["sources"][0]["title"] == "docs/a.md"
+    # reflection 已生成
+    assert assistant["reflection"]
+    import json as _json
+    ref = _json.loads(assistant["reflection"])
+    assert ref["使用文档检索"] is True

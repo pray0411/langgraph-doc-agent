@@ -109,6 +109,16 @@ python -X utf8 main.py web
 - **消息操作**：hover 显示复制按钮
 - **移动端适配**：窄屏侧边栏自动收起（☰ 展开）
 
+## Token 用量与成本
+
+每次回答的"过程详情"面板展示 Token 用量与成本估算（基于各服务商公开单价，见
+`config.py` 的 `PROVIDER_PRICES`，可自行调整）：
+
+- **精确用量**：非流式 `/ask` 路径经 LangChain `on_llm_end` 回调获取
+- **流式估算**：`/ask/stream` 路径下 **DeepSeek 的流式响应不返回 usage**（服务商限制），
+  自动按回答文本长度估算并标注"（估算）"
+- 成本估算仅供参考，非账单
+
 ## 安全（API Token，可选）
 
 `.env` 配置 `API_TOKEN=xxx` 后，`/ask`、`/ask/stream`、`/api/mode`、`/api/config`、
@@ -162,7 +172,8 @@ python -m pytest tests/ -v
 测试覆盖：混合检索（语义通道/BM25 回退/无关拒答）、checkpointer 多轮记忆、
 API Token 鉴权、并发配置读写、工具降级（网络故障时不崩溃）、
 真实工具调用提取与 grounded 检查、来源提取（文档/网页）、
-会话列表与删除、流式事件结构、真实 HTTP 契约（thread_id/401）。
+会话列表与删除、历史回放（含 sources/reflection 生成）、流式事件结构、
+Token 用量提取与成本估算、真实 HTTP 契约（thread_id/401）。
 测试不依赖真实网络/仓库文件系统（索引与记忆隔离到临时目录）。
 
 ## 后续扩展

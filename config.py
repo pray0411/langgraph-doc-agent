@@ -51,6 +51,17 @@ EMBEDDING_MODEL = os.getenv(
 
 INDEX_FILE = INDEX_DIR / "index.json"
 
+# ===== 成本估算（可选）=====
+# 各服务商每百万 token 单价（人民币，近似公开定价；估算展示用，非账单）
+# 结构: {provider: {"input": float, "output": float}}
+PROVIDER_PRICES = {
+    "deepseek": {"input": 2.0, "output": 8.0},        # deepseek-chat
+    "openai": {"input": 1.2, "output": 4.8},          # gpt-4o-mini 近似
+    "qwen": {"input": 0.5, "output": 2.0},            # qwen-plus 近似
+    "zhipu": {"input": 0.6, "output": 2.0},           # glm-4-flash 近似
+    "moonshot": {"input": 12.0, "output": 12.0},      # moonshot-v1-8k 近似
+}
+
 # ===== 服务商预设（OpenAI 兼容接口）=====
 # 每个服务商: {default_base_url, default_model, api_key_env}
 PROVIDER_PRESETS = {

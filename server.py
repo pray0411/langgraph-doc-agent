@@ -275,6 +275,8 @@ class Handler(BaseHTTPRequestHandler):
                 "log": result.get("messages", []),
                 "reflection": result.get("reflection", ""),
                 "sources": result.get("sources", []),
+                "usage": result.get("usage"),
+                "cost": result.get("cost"),
                 "thread_id": thread_id,
                 "is_new_thread": is_new_thread,
             }

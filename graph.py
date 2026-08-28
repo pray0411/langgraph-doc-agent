@@ -15,8 +15,10 @@ V2 说明：架构从 V1 的"规则路由 + 人工确认 + 反思"演进为 ReAc
 """
 import re
 import threading
+import uuid
 from typing import TypedDict
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_openai import ChatOpenAI
 # 注：LangGraph V1.0 起 create_react_agent 弃用并计划迁移到 langchain.agents.create_agent，
 # 但当前 langgraph 1.2.10 中 langgraph.prebuilt 路径仍可用，且无需额外安装 langchain 包。
@@ -59,8 +61,49 @@ def get_memory() -> SqliteSaver:
 
 # agent 构建缓存：按 provider 缓存，避免每次提问重建（create_react_agent 有开销）。
 # 缓存键 = (provider, 运行时配置版本号)——网页端换 Key/模型后版本号变化，自动重建。
+# 缓存值 = agent；usage 回调 handler 挂在 agent.__usage_handler 上随缓存保存。
 _agent_cache: dict[tuple[str, int], object] = {}
 _agent_cache_lock = threading.Lock()
+
+
+class _UsageCapture(BaseCallbackHandler):
+    """LangChain 回调：在 on_llm_end 捕获本次调用的 token 用量。
+
+    LangGraph 的 stream 模式会剥离 response_metadata 中的 usage（updates 流
+    与 checkpoint 都不含），但 on_llm_end 回调能拿到完整 llm_output——这是
+    流式路径下获取 token 用量的唯一可靠途径。
+    """
+
+    def __init__(self):
+        self.usage: dict | None = None
+
+    def on_llm_end(self, response, **kwargs) -> None:  # noqa: N802
+        llm_output = getattr(response, "llm_output", None) or {}
+        usage = llm_output.get("token_usage") or llm_output.get("usage") or {}
+        if isinstance(usage, dict) and usage.get("total_tokens"):
+            self.usage = {
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+            }
+
+
+def _usage_of(agent) -> dict | None:
+    """从 agent 上取最近一次调用的 token 用量（经 on_llm_end 回调捕获）。"""
+    handler = getattr(agent, "__usage_handler", None)
+    return getattr(handler, "usage", None) if handler else None
+
+
+def _estimate_tokens_from_text(text: str) -> int:
+    """粗略估算文本 token 数（流式模式拿不到精确用量时的降级）。
+
+    中文约 1.5 字/token，英文/数字约 4 字符/token（近似，仅供展示）。
+    """
+    if not text:
+        return 0
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    other = len(text) - cjk
+    return max(1, int(cjk / 1.5 + other / 4))
 
 
 def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
@@ -85,6 +128,8 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
 
     from config import OLLAMA_BASE_URL, OLLAMA_MODEL
 
+    usage_handler = _UsageCapture()
+
     if provider == "ollama":
         # 本地 Ollama 模型：OpenAI 兼容接口，无需 API Key
         model = ChatOpenAI(
@@ -92,6 +137,7 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
             api_key="ollama",  # Ollama 忽略 Key，占位即可
             base_url=OLLAMA_BASE_URL,
             temperature=0.3,
+            callbacks=[usage_handler],
         )
     else:
         # 在线模式：从 provider 配置统一获取（网页端可动态更换 Key）
@@ -106,6 +152,7 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
             api_key=api_key,
             base_url=base_url,
             temperature=0.3,
+            callbacks=[usage_handler],
         )
 
     agent = create_react_agent(
@@ -113,6 +160,8 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
         tools=[search_documents, web_search, get_weather],
         checkpointer=memory or get_memory(),
     )
+    # 挂 usage 回调供 _usage_of 读取（随 agent 缓存一起保存）
+    agent.__usage_handler = usage_handler  # type: ignore[attr-defined]
 
     if memory is None:
         with _agent_cache_lock:
@@ -143,10 +192,18 @@ def ask(
         messages_in.extend(history)
     messages_in.append({"role": "user", "content": question})
 
-    invoke_config = None
-    if thread_id:
-        invoke_config = {"configurable": {"thread_id": thread_id}}
-    result = agent.invoke({"messages": messages_in}, config=invoke_config)
+    # checkpointer 强制要求 thread_id：无会话标识时用一次性临时 id（用完删除，
+    # 保持"单轮不记忆"语义且不污染会话列表）
+    temp_thread = None
+    if not thread_id:
+        temp_thread = f"temp-{uuid.uuid4().hex}"
+        thread_id = temp_thread
+    result = agent.invoke(
+        {"messages": messages_in},
+        config={"configurable": {"thread_id": thread_id}},
+    )
+    if temp_thread:
+        delete_session(temp_thread)
     messages = result.get("messages", [])
     if not messages:
         return "", {"answer": "", "messages": [], "reflection": ""}
@@ -173,11 +230,14 @@ def ask(
     if show_log:
         for line in log:
             print(line)
+    usage = _usage_of(agent)
     return answer, {
         "answer": answer,
         "messages": log,
         "reflection": reflection,
         "sources": _build_sources(tool_calls),
+        "usage": usage,
+        "cost": _estimate_cost(mode or LLM_PROVIDER, usage),
     }
 
 
@@ -196,62 +256,88 @@ def ask_stream(
       {"type": "done", "answer, reflection, sources"} — 完成（含最终完整信息）
       {"type": "error", "message": str}        — 出错
 
-    说明：LangGraph stream_mode="messages" 提供 token 级增量；
-    结束后用 agent.get_state() 取完整消息生成 reflection/sources（需 thread_id）。
+    说明：LangGraph 双流模式（messages + updates）——messages 提供 token 级增量
+    供前端渲染；updates 提供每步的完整消息（工具调用/反思用）。
+    token 用量经 on_llm_end 回调（_UsageCapture）捕获——LangGraph 的流与
+    checkpoint 都会剥离 usage 元数据，回调是流式路径下获取用量的唯一途径。
     """
     agent = build_agent(mode)
 
     messages_in = [{"role": "user", "content": question}]
-    config = None
-    if thread_id:
-        config = {"configurable": {"thread_id": thread_id}}
+    # checkpointer 强制要求 thread_id：无会话标识时用一次性临时 id（用完删除）
+    temp_thread = None
+    if not thread_id:
+        temp_thread = f"temp-{uuid.uuid4().hex}"
+        thread_id = temp_thread
+    config = {"configurable": {"thread_id": thread_id}}
 
     yield {"type": "start", "mode": mode or LLM_PROVIDER}
 
     text_parts: list[str] = []
     seen_tools: set[str] = set()
+    all_messages: list = []  # 从 updates 收集的完整消息（用于 usage/tool_calls）
     try:
-        for msg_chunk, metadata in agent.stream(
-            {"messages": messages_in}, config=config, stream_mode="messages"
+        for item in agent.stream(
+            {"messages": messages_in}, config=config, stream_mode=["messages", "updates"]
         ):
-            node = metadata.get("langgraph_node", "")
-            if node == "agent":
-                content = getattr(msg_chunk, "content", None)
-                if isinstance(content, str) and content:
-                    text_parts.append(content)
-                    yield {"type": "token", "content": content}
-                # 工具调用开始（tool_call_chunks 出现在 agent 的 AIMessage 增量里）
-                for tcc in getattr(msg_chunk, "tool_call_chunks", None) or []:
-                    name = tcc.get("name")
-                    if name and name not in seen_tools:
-                        seen_tools.add(name)
-                        yield {"type": "tool_start", "name": name}
-            elif node == "tools":
-                # 工具结果消息（ToolMessage）——回传摘要供前端展示
-                content = getattr(msg_chunk, "content", None)
-                if isinstance(content, str) and content:
-                    yield {"type": "tool_done", "result": content[:200]}
+            if isinstance(item, tuple):
+                mode_name, inner = item
+                if mode_name == "messages":
+                    msg_chunk, metadata = inner
+                    node = (metadata or {}).get("langgraph_node", "")
+                    if node == "agent":
+                        content = getattr(msg_chunk, "content", None)
+                        if isinstance(content, str) and content:
+                            text_parts.append(content)
+                            yield {"type": "token", "content": content}
+                        # 工具调用开始（tool_call_chunks 出现在 agent 的 AIMessage 增量里）
+                        for tcc in getattr(msg_chunk, "tool_call_chunks", None) or []:
+                            name = tcc.get("name")
+                            if name and name not in seen_tools:
+                                seen_tools.add(name)
+                                yield {"type": "tool_start", "name": name}
+                    elif node == "tools":
+                        # 工具结果消息（ToolMessage）——回传摘要供前端展示
+                        content = getattr(msg_chunk, "content", None)
+                        if isinstance(content, str) and content:
+                            yield {"type": "tool_done", "result": content[:200]}
+                else:
+                    # updates 流：{node: {"messages": [...]}}
+                    for payload in (inner or {}).values():
+                        if isinstance(payload, dict):
+                            all_messages.extend(payload.get("messages", []) or [])
+            else:
+                # 兼容：单独 updates 输出
+                for payload in (item or {}).values():
+                    if isinstance(payload, dict):
+                        all_messages.extend(payload.get("messages", []) or [])
     except Exception as exc:  # noqa: BLE001
         yield {"type": "error", "message": str(exc)}
+        if temp_thread:
+            delete_session(temp_thread)
         return
 
-    # 结束：取完整消息生成 reflection/sources
-    messages = []
-    if thread_id:
-        try:
-            state = agent.get_state(config)
-            messages = list(state.values.get("messages", []))
-        except Exception:  # noqa: BLE001
-            messages = []
-
     answer = "".join(text_parts)
-    tool_calls = _extract_tool_calls(messages)
+    tool_calls = _extract_tool_calls(all_messages)
     reflection = _build_reflection(question, answer, tool_calls, mode or LLM_PROVIDER)
+    # 用量：优先回调精确值（非流式 invoke 路径）；流式路径 deepseek 不返回 usage，
+    # 降级为按文本长度估算并标注 estimated
+    usage = _usage_of(agent)
+    estimated = False
+    if usage is None and answer:
+        total = _estimate_tokens_from_text(answer)
+        usage = {"prompt_tokens": None, "completion_tokens": total, "total_tokens": total}
+        estimated = True
+    if temp_thread:
+        delete_session(temp_thread)
     yield {
         "type": "done",
         "answer": answer,
         "reflection": reflection,
         "sources": _build_sources(tool_calls),
+        "usage": usage,
+        "cost": _estimate_cost(mode or LLM_PROVIDER, usage),
+        "usage_estimated": estimated,
     }
 
 
@@ -387,6 +473,55 @@ def _build_reflection(question: str, answer: str, tool_calls: list[dict], mode: 
     return _json.dumps(reflection, ensure_ascii=False, indent=2)
 
 
+# ---------- Token 用量与成本 ----------
+
+def _extract_usage(messages: list) -> dict | None:
+    """从消息序列中提取最近一次模型调用的 token 用量。
+
+    来源：AIMessage.response_metadata 中的 usage（OpenAI 标准）或
+    token_usage（DeepSeek 返回的实际字段名）。
+    返回: {"prompt_tokens", "completion_tokens", "total_tokens"} 或 None。
+    """
+    usage = None
+    for m in messages:
+        if isinstance(m, dict):
+            meta = m.get("response_metadata", {}) or {}
+        else:
+            meta = getattr(m, "response_metadata", None) or {}
+        u = meta.get("usage") or meta.get("token_usage") or {}
+        if isinstance(u, dict) and u.get("total_tokens"):
+            usage = {
+                "prompt_tokens": u.get("prompt_tokens", 0),
+                "completion_tokens": u.get("completion_tokens", 0),
+                "total_tokens": u.get("total_tokens", 0),
+            }
+    return usage
+
+
+def _estimate_cost(provider: str, usage: dict | None) -> dict | None:
+    """按服务商单价估算本次调用成本（人民币，仅供展示）。
+
+    返回: {"input": 元, "output": 元, "total": 元, "currency": "¥"} 或 None（未知单价）。
+    """
+    if not usage:
+        return None
+    from config import PROVIDER_PRICES
+
+    price = PROVIDER_PRICES.get((provider or "").lower())
+    if not price:
+        return None
+    prompt = usage.get("prompt_tokens") or 0
+    completion = usage.get("completion_tokens") or 0
+    input_cost = (prompt / 1_000_000) * price["input"]
+    output_cost = (completion / 1_000_000) * price["output"]
+    return {
+        "input": round(input_cost, 6),
+        "output": round(output_cost, 6),
+        "total": round(input_cost + output_cost, 6),
+        "currency": "¥",
+    }
+
+
 # ---------- 会话管理（从 checkpointer 读取/删除） ----------
 
 def _message_content(m) -> str:
@@ -449,8 +584,9 @@ def get_session_messages(thread_id: str, limit: int = 100) -> list[dict]:
 
     从 checkpointer 取该 thread 的最新 checkpoint，提取 human/ai 消息
     （跳过 tool 消息）。中间态 AI 消息（仅 tool_calls 无文本）的工具名
-    合并进下一条有文本的 AI 消息，避免前端出现"空回答"气泡。
-    返回: [{"role": "user"|"assistant", "content": str, "tools": [str,...]}, ...]
+    合并进下一条有文本的 AI 消息；并基于每轮的工具调用结果生成
+    sources（来源卡片）与 reflection（过程详情）供前端回放展示。
+    返回: [{"role": "user"|"assistant", "content", "tools", "sources"?, "reflection"?}, ...]
     """
     saver = get_memory()
     # 该 thread 的最新 checkpoint（list 返回最新在前）
@@ -463,33 +599,61 @@ def get_session_messages(thread_id: str, limit: int = 100) -> list[dict]:
     if latest is None:
         return []
 
-    def _tools_of(m) -> list[str]:
+    def _tools_of(m) -> list[dict]:
+        """提取 AI 消息的 tool_calls（name+args），兼容 dict 与 BaseMessage。"""
         if isinstance(m, dict):
             tcs = m.get("tool_calls", []) or []
         else:
             tcs = getattr(m, "tool_calls", None) or []
-        return [tc.get("name") for tc in tcs if isinstance(tc, dict) and tc.get("name")]
+        return [
+            {"name": tc.get("name", ""), "args": tc.get("args", {})}
+            for tc in tcs
+            if isinstance(tc, dict) and tc.get("name")
+        ]
 
     messages = ((latest.checkpoint or {}).get("channel_values", {}) or {}).get("messages", []) or []
     result: list[dict] = []
-    pending_tools: list[str] = []  # 待并入下一条 AI 消息的工具名
+    pending_tools: list[dict] = []      # 待并入下一条 AI 消息的工具调用
+    pending_results: list[str] = []     # 工具结果文本（按顺序对应 pending_tools）
+    current_question = ""
+
     for m in messages:
         mtype = _message_type(m)
         content = _message_content(m).strip()
         if mtype in ("human", "user"):
             if content:
+                current_question = content
                 pending_tools = []
+                pending_results = []
                 result.append({"role": "user", "content": content, "tools": []})
         elif mtype in ("ai", "assistant"):
             tools = _tools_of(m)
             if content:
-                # 有文本：合并之前待并入的工具名，再重置
-                result.append({"role": "assistant", "content": content, "tools": pending_tools + tools})
+                # 有文本：合并待并入的工具调用，生成 sources/reflection
+                all_tools = pending_tools + tools
+                # 工具结果回填（pending_results 对应 pending_tools 部分）
+                for call, res in zip(pending_tools, pending_results):
+                    call["result"] = res
+                sources = _build_sources(all_tools) if all_tools else []
+                reflection = _build_reflection(
+                    current_question, content, all_tools, "history"
+                ) if all_tools else ""
+                result.append({
+                    "role": "assistant",
+                    "content": content,
+                    "tools": [t["name"] for t in all_tools],
+                    "sources": sources,
+                    "reflection": reflection,
+                })
                 pending_tools = []
+                pending_results = []
             elif tools:
-                # 仅调用工具无文本的中间消息：工具名挂起，等真正回答合并
+                # 仅调用工具无文本的中间消息：挂起，等真正回答合并
                 pending_tools = pending_tools + tools
-        # tool 消息跳过（工具结果已反映在 AI 回答里）
+        elif mtype == "tool":
+            # 工具结果消息：记录文本（对应最近的 pending_tools）
+            pending_results.append(content)
+        # 其他类型跳过
     return result[-limit:]
 
 

@@ -185,6 +185,9 @@
   .reflection-body .ok { color: var(--accent); }
   .reflection-body .no { color: var(--text-dim); }
 
+  /* 工具异常警告 */
+  .tool-warn { display: flex; align-items: center; gap: 6px; margin: 2px 0; padding: 6px 12px; background: var(--error-bg); color: var(--error-text); border-radius: 8px; font-size: 12px; max-width: 82%; }
+
   /* ===== 消息操作 ===== */
   .msg-actions { display: flex; gap: 4px; opacity: 0; transition: opacity .15s; }
   .msg-body:hover .msg-actions { opacity: 1; }
@@ -642,7 +645,7 @@ function removeToolStatus() {
 }
 
 /* ===== 反思面板（过程详情，可折叠） ===== */
-function renderReflection(reflectionJson, container) {
+function renderReflection(reflectionJson, container, usage, cost) {
   let ref;
   try { ref = JSON.parse(reflectionJson); } catch (e) { return; }
   if (!ref || typeof ref !== 'object') return;
@@ -657,6 +660,17 @@ function renderReflection(reflectionJson, container) {
     ['回答基于工具结果', ref['回答是否基于工具结果'] ? '<span class="ok">✓ 是</span>' : '<span class="no">否</span>'],
     ['回答长度', esc(String(ref['回答长度'] ?? ''))],
   ];
+  // Token 用量与成本（本次调用）
+  if (usage && usage.total_tokens) {
+    const est = usage.estimated ? '（估算）' : '';
+    const costText = cost && cost.total != null
+      ? ' ≈ ' + cost.currency + cost.total.toFixed(4)
+      : '';
+    const detail = usage.prompt_tokens != null
+      ? esc(usage.total_tokens + '（输入 ' + usage.prompt_tokens + ' / 输出 ' + usage.completion_tokens + '）')
+      : esc(usage.total_tokens + '');
+    rows.push(['Token 用量' + est, detail + costText]);
+  }
   const detail = document.createElement('details');
   detail.className = 'reflection';
   detail.innerHTML = '<summary>🔍 过程详情（' + tools.length + ' 次工具调用）</summary>';
@@ -731,7 +745,7 @@ async function deleteSession(id) {
 }
 
 /* 加载并渲染历史会话消息 */
-function addHistoryMessage(role, content, tools) {
+function addHistoryMessage(role, content, tools, sources, reflection) {
   const welcome = document.getElementById('welcome');
   if (welcome) welcome.remove();
   const msg = document.createElement('div');
@@ -761,6 +775,29 @@ function addHistoryMessage(role, content, tools) {
   }
   body.appendChild(name);
   body.appendChild(bubble);
+
+  // 来源卡片（历史回放）
+  if (sources && sources.length) {
+    const srcWrap = document.createElement('div');
+    srcWrap.className = 'sources';
+    sources.forEach(s => {
+      const a = document.createElement('a');
+      a.className = 'source-card';
+      if (s.type === 'web' && s.url) {
+        a.href = s.url; a.target = '_blank'; a.rel = 'noopener';
+        a.innerHTML = '<span class="source-icon">🔗</span><span><span class="source-title">' + esc(s.title || s.url) + '</span><br><span class="source-preview">' + esc(s.url) + '</span></span>';
+      } else {
+        a.innerHTML = '<span class="source-icon">📄</span><span><span class="source-title">' + esc(s.title) + '</span><br><span class="source-preview">' + esc(s.preview || '') + '</span></span>';
+      }
+      srcWrap.appendChild(a);
+    });
+    body.appendChild(srcWrap);
+  }
+  // 反思面板（历史回放）
+  if (reflection) {
+    renderReflection(reflection, body);
+  }
+
   msg.appendChild(avatar);
   msg.appendChild(body);
   chatInner.appendChild(msg);
@@ -769,7 +806,7 @@ function addHistoryMessage(role, content, tools) {
 function switchSession(id) {
   threadId = id;
   chatInner.innerHTML = '';
-  // 加载历史消息回放
+  // 加载历史消息回放（含来源卡片与反思面板）
   fetch('/api/sessions/' + encodeURIComponent(id) + '/messages', { headers: authHeaders({}) })
     .then(resp => resp.ok ? resp.json() : null)
     .then(data => {
@@ -781,7 +818,10 @@ function switchSession(id) {
         hint.innerHTML = '<div class="welcome-icon">✦</div><h2>空会话</h2><p>直接提问开始对话</p>';
         chatInner.appendChild(hint);
       } else {
-        msgs.forEach(m => addHistoryMessage(m.role === 'user' ? 'user' : 'assistant', m.content, m.tools));
+        msgs.forEach(m => addHistoryMessage(
+          m.role === 'user' ? 'user' : 'assistant',
+          m.content, m.tools, m.sources, m.reflection
+        ));
       }
       scrollBottom();
     })
@@ -882,6 +922,33 @@ async function ask() {
     const decoder = new TextDecoder();
     let buffer = '';
     let toolShown = false;
+    let usage = null;
+    let cost = null;
+    let toolWarns = [];
+
+    // 流式渲染节流：token 累积，定时刷新（避免每个 token 全量重渲染卡顿）
+    let renderTimer = null;
+    let renderDirty = false;
+    function scheduleRender() {
+      renderDirty = true;
+      if (renderTimer) return;
+      renderTimer = setTimeout(() => {
+        renderTimer = null;
+        if (renderDirty) {
+          renderDirty = false;
+          bubble.innerHTML = renderMarkdown(answer);
+          scrollBottom();
+        }
+      }, 50);  // 每 50ms 最多重渲染一次
+    }
+    function flushRender() {
+      if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
+      if (renderDirty || answer) {
+        renderDirty = false;
+        bubble.innerHTML = renderMarkdown(answer);
+        scrollBottom();
+      }
+    }
 
     while (true) {
       const { done, value } = await reader.read();
@@ -891,17 +958,26 @@ async function ask() {
         if (ev.type === 'token') {
           if (!sawToken) { sawToken = true; removeTyping(); removeToolStatus(); }
           answer += ev.content;
-          // 增量渲染：简单起见累积后整块渲染（性能足够）
-          bubble.innerHTML = renderMarkdown(answer);
-          scrollBottom();
+          scheduleRender();
         } else if (ev.type === 'tool_start') {
           if (!sawToken) { removeTyping(); addToolStatus(ev.name); toolShown = true; }
         } else if (ev.type === 'tool_done') {
-          // 工具完成，保持状态提示
+          // 工具失败信息透传：结果含失败/错误字样时显示警告
+          const r = (ev.result || '').trim();
+          if (r && /失败|错误|无法|没有搜索|查无|超时|error|fail/i.test(r)) {
+            toolWarns.push(r.slice(0, 80));
+            const warn = document.createElement('div');
+            warn.className = 'tool-warn';
+            warn.textContent = '⚠️ 工具异常：' + r.slice(0, 80);
+            chatInner.appendChild(warn);
+            scrollBottom();
+          }
         } else if (ev.type === 'done') {
-          if (ev.answer) { answer = ev.answer; bubble.innerHTML = renderMarkdown(answer); }
+          if (ev.answer) { answer = ev.answer; flushRender(); }
           if (ev.sources) sources = ev.sources;
           if (ev.reflection) reflection = ev.reflection;
+          if (ev.usage) { usage = ev.usage; usage.estimated = ev.usage_estimated || false; }
+          if (ev.cost) cost = ev.cost;
         } else if (ev.type === 'meta') {
           threadId = ev.thread_id || threadId;
         } else if (ev.type === 'error') {
@@ -912,6 +988,7 @@ async function ask() {
     }
     removeTyping();
     removeToolStatus();
+    flushRender();
     if (!answer) bubble.textContent = '（无回答）';
 
     // 渲染来源卡片
@@ -934,7 +1011,7 @@ async function ask() {
 
     // 渲染反思面板（过程详情，可折叠）
     if (reflection) {
-      renderReflection(reflection, bubble.parentNode);
+      renderReflection(reflection, bubble.parentNode, usage, cost);
     }
 
     // 更新会话列表（本会话可能新增）
