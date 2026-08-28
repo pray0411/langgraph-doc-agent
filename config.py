@@ -14,6 +14,14 @@ BASE_DIR = Path(__file__).resolve().parent
 DOCS_DIR = Path(os.getenv("DOCS_DIR", BASE_DIR / "docs"))
 INDEX_DIR = Path(os.getenv("INDEX_DIR", BASE_DIR / "index"))
 
+# 多轮会话记忆存储（SQLite checkpointer）
+MEMORY_DB = os.getenv("MEMORY_DB", str(BASE_DIR / "data" / "memory.sqlite"))
+
+# 本地 API token（安全加固，可选）：
+# 设置后，/ask 与 /api/config 等会消耗额度/写入配置的接口要求请求头
+# 携带 `X-API-Token: <token>`；未设置则保持开放（仅本机使用）。
+API_TOKEN = os.getenv("API_TOKEN", "")
+
 # 模型
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek")  # deepseek / openai / qwen / zhipu / moonshot / ollama
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
@@ -33,7 +41,13 @@ BOCHA_API_KEY = os.getenv("BOCHA_API_KEY", "")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 TOP_K = int(os.getenv("TOP_K", "3"))
-MIN_SCORE = float(os.getenv("MIN_SCORE", "0.0"))  # 检索最低分数阈值（BM25 语义：无共现词即 0，视为无关）
+MIN_SCORE = float(os.getenv("MIN_SCORE", "0.0"))  # 检索最低分数阈值（混合检索融合分）
+
+# 语义检索模型（sentence-transformers，本地运行无需 API Key）
+# 未配置/加载失败时自动回退纯 BM25 检索
+EMBEDDING_MODEL = os.getenv(
+    "EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+)
 
 INDEX_FILE = INDEX_DIR / "index.json"
 

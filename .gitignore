@@ -11,6 +11,8 @@ venv/
 
 # 构建产物
 index/
+data/
+models/
 *.log
 
 # 临时凭据文件（禁止提交）

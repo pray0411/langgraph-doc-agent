@@ -124,6 +124,10 @@
           <label>模型名（可选）</label>
           <input id="cfgModel" placeholder="默认模型">
         </div>
+        <div class="key-row">
+          <label>API Token（.env 配置了 API_TOKEN 时需要）</label>
+          <input id="cfgToken" type="password" placeholder="服务端 API_TOKEN，留空则不校验">
+        </div>
         <div class="key-row key-actions">
           <span id="cfgMsg"></span>
           <button class="btn-save" id="cfgSave">保存</button>
@@ -153,9 +157,38 @@ const cfgProvider = document.getElementById('cfgProvider');
 const cfgApiKey = document.getElementById('cfgApiKey');
 const cfgBaseUrl = document.getElementById('cfgBaseUrl');
 const cfgModel = document.getElementById('cfgModel');
+const cfgToken = document.getElementById('cfgToken');
 const cfgMsg = document.getElementById('cfgMsg');
-let history = [];
+let threadId = null;
 let currentMode = 'deepseek';
+
+// API Token（localStorage 持久化；服务端 .env 配置了 API_TOKEN 时需要）
+function getApiToken() { return localStorage.getItem('pray_api_token') || ''; }
+function setApiToken(t) { localStorage.setItem('pray_api_token', t); }
+
+function authHeaders(extra) {
+  const h = Object.assign({}, extra);
+  const token = getApiToken();
+  if (token) h['X-API-Token'] = token;
+  return h;
+}
+
+// 401 处理：token 缺失/错误时提示用户去设置
+function handleAuthError(data) {
+  if (data && data.error && /API Token/i.test(data.error)) {
+    alert('⚠️ ' + data.error + '\n请在 ⚙ 设置面板填入 API Token');
+    keyPanel.classList.add('open');
+    return true;
+  }
+  return false;
+}
+
+function newThreadId() {
+  // 生成会话标识（服务端 checkpointer 用它持久化多轮记忆）
+  return 'crypto' in window && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
 
 // 当前模型显示映射
 const MODEL_NAMES = {
@@ -182,10 +215,11 @@ async function loadMode() {
 async function switchMode(mode) {
   const resp = await fetch('/api/mode', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: authHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
     body: 'mode=' + encodeURIComponent(mode)
   });
   const data = await resp.json();
+  if (handleAuthError(data)) return;
   if (data.error) { alert('切换失败: ' + data.error); return; }
   updateModelDisplay(data.mode);
 }
@@ -252,19 +286,20 @@ async function ask() {
   addMessage('user', question);
   addTyping();
   btn.disabled = true;
+  if (!threadId) threadId = newThreadId();
   try {
     const resp = await fetch('/ask', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'question=' + encodeURIComponent(question) + '&history=' + encodeURIComponent(JSON.stringify(history))
+      headers: authHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
+      body: 'question=' + encodeURIComponent(question) + '&thread_id=' + encodeURIComponent(threadId)
     });
     const data = await resp.json();
     removeTyping();
+    if (handleAuthError(data)) return;
     if (data.error) { addMessage('assistant', '⚠️ ' + data.error); return; }
     addMessage('assistant', data.answer);
-    history.push({ role: 'user', content: question });
-    history.push({ role: 'assistant', content: data.answer });
-    if (history.length > 40) history = history.slice(-40);
+    // 服务端确认的会话 id（首次生成时回传）
+    if (data.thread_id) threadId = data.thread_id;
   } catch (err) {
     removeTyping();
     addMessage('assistant', '⚠️ 请求失败: ' + err.message);
@@ -285,7 +320,7 @@ input.addEventListener('input', () => {
 });
 
 document.getElementById('clearBtn').addEventListener('click', () => {
-  history = [];
+  threadId = newThreadId();  // 新会话：服务端记忆保留，前端开新 thread
   chatInner.innerHTML = '<div class="welcome" id="welcome"><div class="welcome-icon">✦</div><h2>我能帮你做什么？</h2><p>文档问答 · 实时天气 · 联网搜索 · 普通对话</p><div class="welcome-suggestions"><div class="suggestion" onclick="quickAsk(\'这个项目的核心架构是什么？\')">项目架构</div><div class="suggestion" onclick="quickAsk(\'今天北京的天气怎么样？\')">查天气</div><div class="suggestion" onclick="quickAsk(\'最近有什么AI新闻？\')">AI 新闻</div><div class="suggestion" onclick="quickAsk(\'1+1等于几？\')">算数</div></div></div>';
 });
 
@@ -300,17 +335,20 @@ document.getElementById('cfgSave').addEventListener('click', async () => {
   const apiKey = cfgApiKey.value.trim();
   const baseUrl = cfgBaseUrl.value.trim();
   const model = cfgModel.value.trim();
+  const token = cfgToken.value.trim();
   if (!apiKey) { cfgMsg.textContent = 'API Key 不能为空'; return; }
+  if (token) setApiToken(token);
   try {
     const resp = await fetch('/api/config', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: authHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
       body: 'provider=' + encodeURIComponent(provider)
           + '&api_key=' + encodeURIComponent(apiKey)
           + '&base_url=' + encodeURIComponent(baseUrl)
           + '&model=' + encodeURIComponent(model)
     });
     const data = await resp.json();
+    if (handleAuthError(data)) return;
     if (data.error) { cfgMsg.textContent = data.error; return; }
     cfgMsg.style.color = '#16a34a';
     cfgMsg.textContent = '✅ ' + data.message;

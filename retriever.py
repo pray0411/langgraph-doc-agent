@@ -2,13 +2,15 @@
 
 - load_documents: 读取 docs/ 下所有 .md/.txt/.py 文件
 - split_text: 按段落/长度做重叠切分（chunk）
-- build_index: 切分并保存为 JSON 索引（含 BM25 统计信息）
-- search: 对查询做 jieba 分词（降级 bigram）后按 BM25 打分召回
+- build_index: 切分并保存为 JSON 索引（BM25 统计 + embedding 向量）
+- search: 混合检索——BM25（jieba 分词）+ 语义向量（sentence-transformers）RRF 融合
 
-V2 变更（相对旧版 TF-IDF + 余弦相似度）：
-1. 中文分词升级为 jieba（未安装时自动降级为单字+双字 bigram）
-2. 排序改为 BM25（k1=1.5, b=0.75），对长文档更公平，检索质量明显优于 TF-IDF
-3. 索引文件带版本号，旧格式索引会自动重建（load_index 检测）
+版本历史：
+- V1: TF-IDF + 余弦相似度
+- V2: jieba 分词 + BM25
+- V3（当前）: BM25 + embedding 语义检索的 RRF 融合
+  embedding 不可用（未安装/模型加载失败/未配置）时自动回退纯 BM25，
+  语义检索可用时能理解同义改写（如"架构"与"分层设计"），大幅提升文档问答质量。
 """
 import json
 import math
@@ -16,16 +18,25 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from config import CHUNK_OVERLAP, CHUNK_SIZE, DOCS_DIR, INDEX_DIR, INDEX_FILE
+from config import CHUNK_OVERLAP, CHUNK_SIZE, DOCS_DIR, EMBEDDING_MODEL, INDEX_DIR, INDEX_FILE
 
 SUPPORTED_EXTS = {".md", ".txt", ".py", ".rst", ".html"}
 
 # 索引格式版本：索引结构变化时 +1，旧索引会被自动重建
-INDEX_VERSION = 2
+INDEX_VERSION = 3
 
 # BM25 参数（经典取值）
 BM25_K1 = 1.5
 BM25_B = 0.75
+
+# RRF（Reciprocal Rank Fusion）融合参数
+RRF_K = 60
+
+# 语义检索相关性下限：cosine 低于该值的片段视为与查询语义无关（排除出融合）
+SEMANTIC_MIN_COSINE = 0.2
+
+# 模型缓存目录（sentence-transformers 下载的模型存放处）
+HF_HOME = Path(__file__).parent / "models"
 
 # jieba 可选：未安装时降级到 bigram 分词
 try:
@@ -35,6 +46,37 @@ try:
     _HAS_JIEBA = True
 except ImportError:  # pragma: no cover - 降级路径
     _HAS_JIEBA = False
+
+# embedding 编码器（懒加载单例；不可用时为 None，检索回退纯 BM25）
+_encoder = None
+_encoder_loaded = False
+
+
+def get_encoder():
+    """获取句子编码器（懒加载）。失败返回 None（调用方回退 BM25）。"""
+    global _encoder, _encoder_loaded
+    if _encoder_loaded:
+        return _encoder
+    _encoder_loaded = True
+    try:
+        import os
+        os.environ.setdefault("HF_HOME", str(HF_HOME))
+        from sentence_transformers import SentenceTransformer
+
+        _encoder = SentenceTransformer(EMBEDDING_MODEL, cache_folder=str(HF_HOME))
+        print(f"[embedding] 语义检索可用：{EMBEDDING_MODEL}")
+    except Exception as exc:  # noqa: BLE001 - 任何失败都降级
+        print(f"[embedding] 语义检索不可用，回退纯 BM25：{exc}")
+        _encoder = None
+    return _encoder
+
+
+def encode_texts(texts: list[str]) -> list[list[float]] | None:
+    """批量编码文本；encoder 不可用时返回 None。"""
+    enc = get_encoder()
+    if enc is None:
+        return None
+    return [v.tolist() for v in enc.encode(texts, show_progress_bar=False)]
 
 
 # ---------- 加载 ----------
@@ -169,7 +211,7 @@ def _compute_bm25_meta(tokenized_chunks: list[list[str]]) -> dict:
 
 
 def build_index(docs_dir: Path = DOCS_DIR, force: bool = False) -> dict:
-    """加载文档、切分、计算 BM25 统计并保存索引。"""
+    """加载文档、切分、计算 BM25 统计与 embedding 向量并保存索引。"""
     if INDEX_FILE.exists() and not force:
         return load_index()
     docs = load_documents(docs_dir)
@@ -178,13 +220,22 @@ def build_index(docs_dir: Path = DOCS_DIR, force: bool = False) -> dict:
 
     records = []
     all_tokenized: list[list[str]] = []
+    chunks_all: list[str] = []
     for doc in docs:
         for chunk in split_text(doc["content"]):
             tokens = _tokenize(chunk)
             all_tokenized.append(tokens)
+            chunks_all.append(chunk)
             records.append({"source": doc["path"], "chunk": chunk, "tokens": tokens})
 
+    # 语义向量（可选）：encoder 可用则编码并写入记录，否则记录无 vec 字段
+    vectors = encode_texts(chunks_all)
+    if vectors is not None:
+        for rec, vec in zip(records, vectors):
+            rec["vec"] = vec
+
     meta = _compute_bm25_meta(all_tokenized)
+    meta["embedding_model"] = EMBEDDING_MODEL if vectors is not None else None
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
     INDEX_FILE.write_text(
         json.dumps({"meta": meta, "records": records}, ensure_ascii=False), encoding="utf-8"
@@ -199,7 +250,7 @@ def load_index() -> dict:
         return build_index(force=True)
     try:
         data = json.loads(INDEX_FILE.read_text(encoding="utf-8"))
-        # 兼容旧格式（V1: 纯 records 列表，TF-IDF）与新格式（V2: {meta, records}）
+        # 兼容旧格式（V1: 纯 records 列表；V2: {meta, records} 无向量）与新格式（V3）
         if isinstance(data, list) or data.get("meta", {}).get("version") != INDEX_VERSION:
             return build_index(force=True)
         return data
@@ -209,30 +260,78 @@ def load_index() -> dict:
 
 # ---------- 检索 ----------
 
-# 最低相似度阈值：BM25 语义下，与查询无任何共现词的文档分数 <= 0
+# 最低分数阈值：混合检索融合分；无任何通道命中的片段不参与融合
 MIN_SCORE = 0.0
 
 
-def search(query: str, top_k: int = 3, min_score: float = MIN_SCORE) -> list[dict]:
-    """对查询分词后与索引中所有 chunk 计算 BM25 分数。
+def _cosine(vec_a: list[float], vec_b: list[float]) -> float:
+    """两个向量的余弦相似度。"""
+    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(vec_a, vec_b))
+    norm_a = math.sqrt(sum(x * x for x in vec_a))
+    norm_b = math.sqrt(sum(y * y for y in vec_b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
-    - 只返回分数 >= min_score 的片段（默认 0.0：无共现即无关）
-    - 返回按分数降序的 top_k 个
+
+def search(query: str, top_k: int = 3, min_score: float = MIN_SCORE) -> list[dict]:
+    """混合检索：BM25（jieba 分词）+ 语义向量（sentence-transformers）RRF 融合。
+
+    - 两条通道各自对全部片段打分并排名
+    - 语义通道可用时：任一通道命中的片段参与 RRF 融合（k=60）
+    - 语义通道不可用（索引无向量 / encoder 失败）：回退纯 BM25
+    - 返回按融合分数降序的 top_k 个
     """
     data = load_index()
     meta = data["meta"]
     records = data["records"]
     q_tokens = _tokenize(query)
-    if not q_tokens:
+    if not q_tokens and not query.strip():
         return []
 
-    scored = []
-    for r in records:
-        score = _bm25_score(
-            q_tokens, r["tokens"], meta["n_docs"], Counter(meta["df"]), meta["avg_dl"]
-        )
-        # 严格大于：0 分（与查询无任何共现词）视为无关，即使 min_score=0 也不返回
+    # 通道 1：BM25 分数
+    df = Counter(meta["df"])
+    bm25_scores = [
+        _bm25_score(q_tokens, r["tokens"], meta["n_docs"], df, meta["avg_dl"]) for r in records
+    ]
+
+    # 通道 2：语义相似度（encoder 可用且索引有向量时）
+    q_vec = None
+    if records and "vec" in records[0]:
+        q_vec = encode_texts([query])[0] if get_encoder() is not None else None
+    cosine_scores = [_cosine(q_vec, r.get("vec", [])) if q_vec else 0.0 for r in records]
+
+    semantic_ok = q_vec is not None
+
+    def rank_desc(scores: list[float]) -> list[int]:
+        """降序排名（分数越高排名越前；并列取相同名次）。"""
+        order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+        ranks = [0] * len(scores)
+        for pos, idx in enumerate(order):
+            ranks[idx] = pos
+        return ranks
+
+    bm25_ranks = rank_desc(bm25_scores) if any(s > 0 for s in bm25_scores) else None
+    cosine_ranks = rank_desc(cosine_scores) if semantic_ok else None
+
+    fused = []
+    for i, r in enumerate(records):
+        # 相关性判定：BM25 有共现（>0）或 语义相似度达标；都无则跳过
+        bm25_hit = bm25_scores[i] > 0
+        cosine_hit = semantic_ok and cosine_scores[i] >= SEMANTIC_MIN_COSINE
+        if not (bm25_hit or cosine_hit):
+            continue
+
+        score = 0.0
+        if bm25_ranks is not None and bm25_hit:
+            score += 1.0 / (RRF_K + bm25_ranks[i])
+        if cosine_ranks is not None and cosine_hit:
+            score += 1.0 / (RRF_K + cosine_ranks[i])
+
         if score > min_score:
-            scored.append({"score": score, "source": r["source"], "chunk": r["chunk"]})
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    return scored[:top_k]
+            fused.append({"score": round(score, 6), "source": r["source"], "chunk": r["chunk"]})
+
+    fused.sort(key=lambda x: x["score"], reverse=True)
+    return fused[:top_k]

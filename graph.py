@@ -16,9 +16,12 @@ confirmed 参数与 reflection 字段以兼容调用方。
 from typing import TypedDict
 
 from langchain_openai import ChatOpenAI
+# 注：LangGraph V1.0 起 create_react_agent 弃用并计划迁移到 langchain.agents.create_agent，
+# 但当前 langgraph 1.2.10 中 langgraph.prebuilt 路径仍可用，且无需额外安装 langchain 包。
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.prebuilt import create_react_agent
 
-from config import DEEPSEEK_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_PROVIDER
+from config import DEEPSEEK_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_PROVIDER, MEMORY_DB
 from tools import get_weather, search_documents, web_search
 
 
@@ -28,11 +31,31 @@ class AgentResult(TypedDict, total=False):
     reflection: str
 
 
-def build_agent(mode: str | None = None):
-    """构建通用 Agent（ReAct 模式）。
+# 全局记忆存储：SQLite checkpointer（按 thread_id 持久化多轮会话，重启不丢）。
+# 模块级单例：web 服务多线程共享同一份会话历史。
+_memory = None
+
+
+def get_memory() -> SqliteSaver:
+    """获取全局 SQLite checkpointer（懒加载，进程内单例）。"""
+    global _memory
+    if _memory is None:
+        import sqlite3
+        from pathlib import Path
+
+        db_path = Path(MEMORY_DB)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        _memory = SqliteSaver(conn)
+    return _memory
+
+
+def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
+    """构建通用 Agent（ReAct 模式 + checkpointer 多轮记忆）。
 
     mode: 可选，显式指定模式（deepseek/openai/qwen/zhipu/moonshot/ollama）。
     支持运行时动态切换（如网页端按钮切换）。
+    memory: 可选，checkpointer 实例；默认使用全局 SQLite 记忆（thread_id 会话）。
     """
     provider = (mode or LLM_PROVIDER).lower()
 
@@ -46,22 +69,26 @@ def build_agent(mode: str | None = None):
             base_url=OLLAMA_BASE_URL,
             temperature=0.3,
         )
-        return create_react_agent(model=model, tools=[search_documents, web_search, get_weather])
+    else:
+        # 在线模式：从 provider 配置统一获取（网页端可动态更换 Key）
+        from config import get_provider_config
+        pcfg = get_provider_config(provider)
+        api_key = pcfg.get("api_key") or "empty-key-placeholder"
+        base_url = pcfg.get("base_url") or "https://api.deepseek.com/v1"
+        model_name = pcfg.get("model") or LLM_MODEL
 
-    # 在线模式：从 provider 配置统一获取（网页端可动态更换 Key）
-    from config import get_provider_config
-    pcfg = get_provider_config(provider)
-    api_key = pcfg.get("api_key") or "empty-key-placeholder"
-    base_url = pcfg.get("base_url") or "https://api.deepseek.com/v1"
-    model_name = pcfg.get("model") or LLM_MODEL
+        model = ChatOpenAI(
+            model=model_name,
+            api_key=api_key,
+            base_url=base_url,
+            temperature=0.3,
+        )
 
-    model = ChatOpenAI(
-        model=model_name,
-        api_key=api_key,
-        base_url=base_url,
-        temperature=0.3,
+    return create_react_agent(
+        model=model,
+        tools=[search_documents, web_search, get_weather],
+        checkpointer=memory or get_memory(),
     )
-    return create_react_agent(model=model, tools=[search_documents, web_search, get_weather])
 
 
 def ask(
@@ -70,22 +97,29 @@ def ask(
     show_log: bool = False,
     mode: str | None = None,
     history: list[dict] | None = None,
+    thread_id: str | None = None,
 ) -> tuple[str, AgentResult]:
     """对外问答入口：执行一次 Agent 推理，返回 (回答, 结果详情)。
 
+    thread_id: 会话标识。传入时走 checkpointer 持久化多轮记忆——
+      相同 thread_id 的多次调用共享上下文，无需前端回传 history。
+      不传则退化为单轮（每次独立，不记忆）。
     confirmed: 保留的兼容参数。V2 的 ReAct 循环中，模型自主决定是否继续。
     mode: 可选，动态指定运行模式（deepseek/openai/ollama）。
-    history: 可选，多轮对话历史 [{"role": "user"/"assistant", "content": str}, ...]。
+    history: 可选，兼容参数。传了 thread_id 时建议忽略（checkpointer 已含历史）。
     """
     agent = build_agent(mode)
 
-    # 组装消息：历史 + 当前问题（多轮对话记忆）
+    # 组装消息：历史 + 当前问题（无 thread_id 时才需要手动拼历史）
     messages_in = []
-    if history:
+    if history and not thread_id:
         messages_in.extend(history)
     messages_in.append({"role": "user", "content": question})
 
-    result = agent.invoke({"messages": messages_in})
+    invoke_config = None
+    if thread_id:
+        invoke_config = {"configurable": {"thread_id": thread_id}}
+    result = agent.invoke({"messages": messages_in}, config=invoke_config)
     messages = result.get("messages", [])
     if not messages:
         return "", {"answer": "", "messages": [], "reflection": ""}

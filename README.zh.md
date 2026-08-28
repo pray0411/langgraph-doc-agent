@@ -71,14 +71,33 @@ python -X utf8 main.py web
 - 普通聊天 → 直接回答，不调工具
 - 复杂任务 → 连续调用多个工具
 
-## 检索：jieba + BM25
+## 检索：BM25 + 语义向量（混合检索）
 
-文档问答底层是**本地稀疏检索**（无需外部向量数据库）：
+文档问答底层是**本地混合检索**（无需外部向量数据库）：
 
-- **分词**：中文用 [jieba](https://github.com/fxsjy/jieba)（未安装时自动降级为单字+双字 bigram），过滤中文停用词
-- **排序**：BM25（k1=1.5, b=0.75），比旧版 TF-IDF + 余弦相似度对长文档更公平
-- **索引**：JSON 文件带版本号，旧格式索引首次启动自动重建（`python main.py build` 可强制重建）
-- **阈值**：与查询无任何共现词的片段分数 ≤ 0，默认 `MIN_SCORE=0.0` 直接过滤
+- **语义通道**：[sentence-transformers](https://github.com/UKPLab/sentence-transformers) 本地模型（默认
+  `paraphrase-multilingual-MiniLM-L12-v2`，首次运行自动下载到 `models/`，无需 API Key），
+  理解同义改写（如"架构"与"分层设计"）
+- **词法通道**：中文 [jieba](https://github.com/fxsjy/jieba) 分词 + BM25（k1=1.5, b=0.75），过滤停用词
+- **融合**：两通道各自排名后 **RRF（Reciprocal Rank Fusion, k=60）** 融合
+- **降级**：embedding 模型不可用（未安装/加载失败）时自动回退纯 BM25，功能不中断
+- **索引**：JSON 文件带版本号（V3），旧格式首次启动自动重建（`python main.py build` 可强制重建）
+
+## 多轮记忆（checkpointer）
+
+**真正的服务端会话记忆**：基于 LangGraph SQLite checkpointer（`data/memory.sqlite`），
+按 `thread_id` 持久化每轮对话，**重启服务不丢失**。
+
+- 前端"新对话"按钮生成新 `thread_id`，同一会话内模型能记住上下文
+- `/ask` 响应回传 `thread_id`，浏览器刷新后继续同一会话
+- 命令行 `python -X utf8 main.py ask "问题"` 为单轮（不传 thread_id）
+
+## 安全（API Token，可选）
+
+`.env` 配置 `API_TOKEN=xxx` 后，`/ask`、`/api/mode`、`/api/config` 要求请求头
+`X-API-Token: xxx`，防止本机端口被局域网/他人滥用（防止盗用 API 额度）。
+未配置时保持零配置开放（默认绑定 127.0.0.1）。前端在 ⚙ 设置面板填入 Token 后
+存入浏览器 localStorage。
 
 ## 反思（reflection）
 
@@ -91,18 +110,23 @@ python -X utf8 main.py web
 
 ```
 langgraph-doc-agent/
-├── graph.py         # ★ 核心：create_react_agent 通用 Agent + 反思逻辑
+├── graph.py         # ★ 核心：create_react_agent 通用 Agent + 反思逻辑 + checkpointer 记忆
 ├── tools.py         # 工具集：search_documents / web_search / get_weather
-├── retriever.py     # jieba 分词 + BM25 检索（文档问答底层）
-├── server.py        # 网页服务（含并发安全与请求超时）
+├── retriever.py     # jieba+BM25 + embedding 语义的 RRF 混合检索
+├── server.py        # 网页服务（并发安全、请求超时、API Token 鉴权）
 ├── main.py          # 命令行入口
-├── config.py        # 配置（含运行时 provider 动态切换，线程安全）
+├── config.py        # 配置（运行时 provider 动态切换、记忆/检索/鉴权配置）
 ├── legacy/          # V1 历史存档（graph_v1.py / llm.py），不参与运行
+├── start.bat        # 前台启动脚本
+├── start-background.bat  # 后台静默启动（开机自启用）
+├── stop.bat         # 停止服务
 ├── requirements.txt
 ├── .env.example
 ├── docs/            # 文档知识库
 ├── static/          # 网页前端
-└── index/           # 检索索引
+├── index/           # 检索索引
+├── data/            # 会话记忆（memory.sqlite，运行时生成）
+└── models/          # embedding 模型缓存（首次运行下载）
 ```
 
 > `legacy/` 中的 `graph_v1.py`（StateGraph 版本）与 `llm.py`（V1 模型封装）仅作学习参考，
@@ -114,17 +138,17 @@ langgraph-doc-agent/
 python -m pytest tests/ -v
 ```
 
-测试覆盖：BM25 检索（相关/无关/阈值/索引升级）、并发配置读写、
-工具降级（网络故障时不崩溃）、真实工具调用提取与 grounded 检查、服务端超时语义。
-测试不依赖真实网络/仓库文件系统（索引隔离到临时目录）。
+测试覆盖：混合检索（语义通道/BM25 回退/无关拒答）、checkpointer 多轮记忆、
+API Token 鉴权、并发配置读写、工具降级（网络故障时不崩溃）、
+真实工具调用提取与 grounded 检查、服务端超时语义。
+测试不依赖真实网络/仓库文件系统（索引与记忆隔离到临时目录）。
 
 ## 后续扩展
 
-- [ ] 多轮对话记忆（checkpointer）
 - [ ] 流式输出（SSE）
 - [ ] 更多工具：日历、邮件、数据库查询
 - [ ] 接入 MCP 生态
-- [ ] 检索升级为 embedding 向量库
+- [ ] 前端会话切换（多会话列表）
 
 ## License
 

@@ -22,16 +22,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 @pytest.fixture(autouse=True)
 def _clean_env(tmp_path, monkeypatch):
-    """每个测试前清理环境变量 + 把索引/文档目录隔离到临时目录。"""
-    for k in ("LLM_PROVIDER", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "BOCHA_API_KEY"):
+    """每个测试前清理环境变量 + 把索引/文档/记忆目录隔离到临时目录。"""
+    for k in ("LLM_PROVIDER", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "BOCHA_API_KEY",
+              "API_TOKEN", "MEMORY_DB", "EMBEDDING_MODEL"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("DOCS_DIR", str(tmp_path / "docs"))
     monkeypatch.setenv("INDEX_DIR", str(tmp_path / "index"))
+    monkeypatch.setenv("MEMORY_DB", str(tmp_path / "memory.sqlite"))
+    monkeypatch.setenv("EMBEDDING_MODEL", "nonexistent-no-download")
     # 重新导入相关模块以应用 monkeypatch（config 在 import 时读 env）
-    for mod in ("config", "retriever", "tools", "graph"):
+    for mod in ("config", "retriever", "tools", "graph", "server"):
         sys.modules.pop(mod, None)
     yield
-    for mod in ("config", "retriever", "tools", "graph"):
+    for mod in ("config", "retriever", "tools", "graph", "server"):
         sys.modules.pop(mod, None)
 
 
@@ -102,7 +105,63 @@ def test_index_version_upgrade_auto_rebuild(sample_docs, tmp_path):
     INDEX_FILE.write_text(json.dumps([{"source": "x", "chunk": "y", "vec": {"a": 1}}]), encoding="utf-8")
     data = load_index()
     assert "meta" in data
-    assert data["meta"]["version"] == 2
+    assert data["meta"]["version"] == 3
+
+
+# ---------- 检索（语义混合） ----------
+
+def test_search_semantic_channel_participates_in_fusion(sample_docs, monkeypatch):
+    """索引含向量时，语义通道应参与 RRF 融合（BM25 无共现也能召回）。"""
+    import retriever as retriever_mod
+
+    def _fake_encode(texts):
+        # 伪向量：与"语言开发"相关的文本语义相似（第 1 维为 1），其余弱相关
+        return [[1.0 if ("语言" in t or "开发" in t) else 0.0, float(len(t) % 7) / 7.0]
+                for t in texts]
+
+    class _FakeEncoder:
+        def encode(self, texts, show_progress_bar=False):
+            return _fake_encode(texts)
+
+    # 让语义通道"可用"：encoder 非 None + encode_texts 返回伪向量
+    monkeypatch.setattr(retriever_mod, "get_encoder", lambda: _FakeEncoder())
+    monkeypatch.setattr(retriever_mod, "encode_texts", _fake_encode)
+
+    from retriever import build_index, search
+    build_index(force=True)
+
+    # 语义命中：查询与"用什么语言开发"语义相关，且文档含"语言"（第 1 维命中）
+    hits = search("这个项目用什么语言开发", top_k=3)
+    assert len(hits) > 0
+
+    # 索引里确实存了向量（语义通道真实生效）
+    from config import INDEX_FILE
+    import json as _json
+    data = _json.loads(INDEX_FILE.read_text(encoding="utf-8"))
+    assert "vec" in data["records"][0]
+
+
+def test_search_falls_back_to_bm25_without_embedding(sample_docs, monkeypatch):
+    """embedding 不可用（模型加载失败）时应回退纯 BM25，不崩溃。"""
+    monkeypatch.setenv("EMBEDDING_MODEL", "nonexistent/model-that-fails")
+    import retriever as retriever_mod
+
+    # 强制 encoder 加载失败
+    monkeypatch.setattr(retriever_mod, "get_encoder", lambda: None)
+    from retriever import build_index, search
+
+    build_index(force=True)
+    hits = search("这个项目的技术栈是什么", top_k=3)
+    assert len(hits) > 0
+
+
+def test_search_irrelevant_query_returns_empty(sample_docs):
+    """完全无关的问题（无共现词且语义无关）应返回空。"""
+    from retriever import build_index, search
+
+    build_index(force=True)
+    hits = search("量子物理和弦理论的区别", top_k=3)
+    assert hits == []
 
 
 # ---------- 配置 ----------
@@ -310,3 +369,87 @@ def test_legacy_files_not_imported_by_runtime():
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     assert alias.name not in ("llm", "graph_v1"), f"{fname} import 了 legacy 模块"
+
+
+# ---------- 多轮记忆（checkpointer） ----------
+
+def test_memory_persists_across_asks(monkeypatch, tmp_path):
+    """相同 thread_id 的连续调用应累积历史（服务端真记忆）。"""
+    monkeypatch.setenv("MEMORY_DB", str(tmp_path / "mem.sqlite"))
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    import sqlite3
+
+    conn = sqlite3.connect(tmp_path / "mem.sqlite", check_same_thread=False)
+    saver = SqliteSaver(conn)
+
+    # 用假模型构建带 checkpointer 的 agent，验证历史累积
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    class FakeModel(BaseChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            user_count = sum(1 for m in messages if isinstance(m, HumanMessage))
+            return ChatResult(generations=[ChatGeneration(
+                message=AIMessage(content=f"用户已提问 {user_count} 次"))])
+
+        @property
+        def _llm_type(self):
+            return "fake"
+
+    from langgraph.prebuilt import create_react_agent
+    agent = create_react_agent(model=FakeModel(), tools=[], checkpointer=saver)
+
+    r1 = agent.invoke({"messages": [{"role": "user", "content": "第一问"}]},
+                      config={"configurable": {"thread_id": "t1"}})
+    r2 = agent.invoke({"messages": [{"role": "user", "content": "第二问"}]},
+                      config={"configurable": {"thread_id": "t1"}})
+    assert "用户已提问 1 次" in r1["messages"][-1].content
+    assert "用户已提问 2 次" in r2["messages"][-1].content
+
+    # 不同 thread 隔离
+    r3 = agent.invoke({"messages": [{"role": "user", "content": "新会话"}]},
+                      config={"configurable": {"thread_id": "t2"}})
+    assert "用户已提问 1 次" in r3["messages"][-1].content
+
+
+def test_get_memory_singleton(monkeypatch, tmp_path):
+    """get_memory 应返回同一全局 SQLite 实例且可持久化。"""
+    monkeypatch.setenv("MEMORY_DB", str(tmp_path / "mem2.sqlite"))
+    from graph import get_memory
+
+    m1 = get_memory()
+    m2 = get_memory()
+    assert m1 is m2  # 单例
+
+
+# ---------- API Token 鉴权 ----------
+
+def test_auth_allows_without_token(monkeypatch):
+    """未配置 API_TOKEN 时（默认）应放行。"""
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    from server import Handler
+
+    handler = Handler.__new__(Handler)
+    handler.headers = {}
+    assert handler._auth_ok() is True
+
+
+def test_auth_rejects_wrong_token(monkeypatch):
+    """配置了 API_TOKEN 时，错误 token 应被拒绝。"""
+    monkeypatch.setenv("API_TOKEN", "secret123")
+    from server import Handler
+
+    handler = Handler.__new__(Handler)
+    handler.headers = {"X-API-Token": "wrong"}
+    assert handler._auth_ok() is False
+
+
+def test_auth_accepts_correct_token(monkeypatch):
+    """配置了 API_TOKEN 时，正确 token 应放行。"""
+    monkeypatch.setenv("API_TOKEN", "secret123")
+    from server import Handler
+
+    handler = Handler.__new__(Handler)
+    handler.headers = {"X-API-Token": "secret123"}
+    assert handler._auth_ok() is True

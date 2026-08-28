@@ -4,7 +4,7 @@ GET  /             -> 问答页面
 GET  /health       -> 健康检查
 GET  /api/mode     -> 获取当前运行模式
 POST /api/mode     -> 切换运行模式（deepseek/openai/ollama，无需重启）
-POST /ask          -> {question} 返回 {answer, log, reflection}
+POST /ask          -> {question, thread_id?} 返回 {answer, log, reflection, thread_id}
 
 加固措施：
 - 请求体大小限制（MAX_BODY，防止超大请求）
@@ -13,6 +13,7 @@ POST /ask          -> {question} 返回 {answer, log, reflection}
 """
 import json
 import threading
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -79,6 +80,24 @@ def available_modes() -> list[str]:
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _auth_ok(self) -> bool:
+        """API token 校验：配置了 API_TOKEN 时，要求请求头 X-API-Token 匹配。
+
+        未配置 token（默认）时始终放行，保持本机使用的零配置体验。
+        """
+        from config import API_TOKEN
+
+        if not API_TOKEN:
+            return True
+        return self.headers.get("X-API-Token", "") == API_TOKEN
+
+    def _auth_required(self) -> bool:
+        """校验 token；失败时写 401 并返回 False。"""
+        if self._auth_ok():
+            return True
+        self._json({"error": "缺少或无效的 API Token（请在 .env 配置 API_TOKEN）"}, 401)
+        return False
+
     def do_GET(self):  # noqa: N802
         if self.path in ("/", "/index.html"):
             html = INDEX_HTML.read_text(encoding="utf-8")
@@ -97,12 +116,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         if self.path == "/api/mode":
+            if not self._auth_required():
+                return
             self._handle_set_mode()
             return
         if self.path == "/api/config":
+            if not self._auth_required():
+                return
             self._handle_set_config()
             return
         if self.path == "/ask":
+            if not self._auth_required():
+                return
             self._handle_ask()
             return
         self.send_error(404)
@@ -166,21 +191,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "问题不能为空"}, 400)
             return
 
-        # 解析多轮对话历史（JSON 数组，可选）
-        history = []
-        hist_raw = (data.get("history") or [""])[0].strip()
-        if hist_raw:
-            try:
-                parsed = json.loads(hist_raw)
-                if isinstance(parsed, list):
-                    # 只保留 user/assistant 角色，限制条数避免过长
-                    history = [
-                        {"role": m["role"], "content": m["content"]}
-                        for m in parsed
-                        if m.get("role") in ("user", "assistant") and m.get("content")
-                    ][-20:]
-            except (json.JSONDecodeError, KeyError, TypeError):
-                history = []
+        # 会话标识：前端传入 thread_id 则沿用（多轮记忆），否则生成新会话
+        thread_id = (data.get("thread_id") or [""])[0].strip()
+        if not thread_id:
+            thread_id = uuid.uuid4().hex
+            is_new_thread = True
+        else:
+            is_new_thread = False
 
         # 单请求超时：子线程执行，主线程等待，超时返回。
         # 用 Event 做完成信号，避免旧版 Timer+setdefault 的竞态：
@@ -190,8 +207,8 @@ class Handler(BaseHTTPRequestHandler):
 
         def _run():
             try:
-                # 使用当前动态模式 + 多轮历史（运行时切换，无需重启服务）
-                answer, result = ask(question, mode=get_mode(), history=history)
+                # checkpointer 按 thread_id 自动续上历史，无需前端回传 history
+                answer, result = ask(question, mode=get_mode(), thread_id=thread_id)
                 result_box["ok"] = (answer, result)
             except Exception:  # noqa: BLE001
                 result_box["error"] = True
@@ -218,6 +235,8 @@ class Handler(BaseHTTPRequestHandler):
                 "answer": answer,
                 "log": result.get("messages", []),
                 "reflection": result.get("reflection", ""),
+                "thread_id": thread_id,
+                "is_new_thread": is_new_thread,
             }
         )
 
