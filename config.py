@@ -88,16 +88,26 @@ import threading as _threading
 
 _runtime_provider_config: dict = {}
 _runtime_config_lock = _threading.Lock()
+# 配置版本号：每次运行时配置变更 +1，供外部缓存失效（如 agent 按 mode 缓存）
+_runtime_config_version = 0
+
+
+def get_runtime_config_version() -> int:
+    """返回运行时配置版本号（agent 缓存失效用）。"""
+    with _runtime_config_lock:
+        return _runtime_config_version
 
 
 def set_runtime_provider_config(provider: str, api_key: str, base_url: str = "", model: str = ""):
     """设置某 provider 的运行时配置（网页端更换 Key 用）。"""
+    global _runtime_config_version
     with _runtime_config_lock:
         _runtime_provider_config[provider.lower()] = {
             "api_key": api_key,
             "base_url": base_url,
             "model": model,
         }
+        _runtime_config_version += 1
 
 
 def get_provider_config(provider: str) -> dict:

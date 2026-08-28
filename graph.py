@@ -10,9 +10,10 @@
 这是 LangGraph 最主流的 Agent 架构（ReAct / Tool-calling Agent）。
 
 V2 说明：架构从 V1 的"规则路由 + 人工确认 + 反思"演进为 ReAct 通用 Agent，
-人工确认与反思改由模型在循环内自然处理（工具结果即观察）。对外仍保留
-confirmed 参数与 reflection 字段以兼容调用方。
+人工确认与反思改由模型在循环内自然处理（工具结果即观察）。对外保留 reflection
+字段供前端展示过程信息。
 """
+import threading
 from typing import TypedDict
 
 from langchain_openai import ChatOpenAI
@@ -21,7 +22,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.prebuilt import create_react_agent
 
-from config import DEEPSEEK_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_PROVIDER, MEMORY_DB
+from config import LLM_MODEL, LLM_PROVIDER, MEMORY_DB
 from tools import get_weather, search_documents, web_search
 
 
@@ -33,31 +34,52 @@ class AgentResult(TypedDict, total=False):
 
 # 全局记忆存储：SQLite checkpointer（按 thread_id 持久化多轮会话，重启不丢）。
 # 模块级单例：web 服务多线程共享同一份会话历史。
+# 加锁防并发竞态：ThreadingHTTPServer 多线程首次请求时可能同时初始化。
 _memory = None
+_memory_lock = threading.Lock()
 
 
 def get_memory() -> SqliteSaver:
-    """获取全局 SQLite checkpointer（懒加载，进程内单例）。"""
+    """获取全局 SQLite checkpointer（懒加载，进程内单例，线程安全）。"""
     global _memory
     if _memory is None:
-        import sqlite3
-        from pathlib import Path
+        with _memory_lock:
+            if _memory is None:
+                import sqlite3
+                from pathlib import Path
 
-        db_path = Path(MEMORY_DB)
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        _memory = SqliteSaver(conn)
+                db_path = Path(MEMORY_DB)
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+                conn = sqlite3.connect(str(db_path), check_same_thread=False)
+                _memory = SqliteSaver(conn)
     return _memory
 
 
+# agent 构建缓存：按 provider 缓存，避免每次提问重建（create_react_agent 有开销）。
+# 缓存键 = (provider, 运行时配置版本号)——网页端换 Key/模型后版本号变化，自动重建。
+_agent_cache: dict[tuple[str, int], object] = {}
+_agent_cache_lock = threading.Lock()
+
+
 def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
-    """构建通用 Agent（ReAct 模式 + checkpointer 多轮记忆）。
+    """构建通用 Agent（ReAct 模式 + checkpointer 多轮记忆），按 provider 缓存。
 
     mode: 可选，显式指定模式（deepseek/openai/qwen/zhipu/moonshot/ollama）。
     支持运行时动态切换（如网页端按钮切换）。
     memory: 可选，checkpointer 实例；默认使用全局 SQLite 记忆（thread_id 会话）。
+    传入自定义 memory 时不走缓存（测试/特殊用途）。
     """
     provider = (mode or LLM_PROVIDER).lower()
+
+    from config import get_runtime_config_version
+
+    if memory is None:
+        version = get_runtime_config_version()
+        cache_key = (provider, version)
+        with _agent_cache_lock:
+            cached = _agent_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
     from config import OLLAMA_BASE_URL, OLLAMA_MODEL
 
@@ -84,16 +106,20 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
             temperature=0.3,
         )
 
-    return create_react_agent(
+    agent = create_react_agent(
         model=model,
         tools=[search_documents, web_search, get_weather],
         checkpointer=memory or get_memory(),
     )
 
+    if memory is None:
+        with _agent_cache_lock:
+            _agent_cache[cache_key] = agent
+    return agent
+
 
 def ask(
     question: str,
-    confirmed: bool = True,
     show_log: bool = False,
     mode: str | None = None,
     history: list[dict] | None = None,
@@ -104,7 +130,6 @@ def ask(
     thread_id: 会话标识。传入时走 checkpointer 持久化多轮记忆——
       相同 thread_id 的多次调用共享上下文，无需前端回传 history。
       不传则退化为单轮（每次独立，不记忆）。
-    confirmed: 保留的兼容参数。V2 的 ReAct 循环中，模型自主决定是否继续。
     mode: 可选，动态指定运行模式（deepseek/openai/ollama）。
     history: 可选，兼容参数。传了 thread_id 时建议忽略（checkpointer 已含历史）。
     """

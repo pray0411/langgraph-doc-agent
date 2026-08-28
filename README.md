@@ -73,15 +73,19 @@ python -X utf8 main.py web
 
 ## 检索：BM25 + 语义向量（混合检索）
 
-文档问答底层是**本地混合检索**（无需外部向量数据库）：
+文档问答底层是**本地混合检索**（无需外部向量数据库），**定位适合中小型文档集**（数百个片段以内）——检索为内存全量打分 + 结果缓存，文档量极大时建议换向量数据库：
 
 - **语义通道**：[sentence-transformers](https://github.com/UKPLab/sentence-transformers) 本地模型（默认
-  `paraphrase-multilingual-MiniLM-L12-v2`，首次运行自动下载到 `models/`，无需 API Key），
+  `paraphrase-multilingual-MiniLM-L12-v2`，首次使用自动下载到 `models/`，无需 API Key），
   理解同义改写（如"架构"与"分层设计"）
 - **词法通道**：中文 [jieba](https://github.com/fxsjy/jieba) 分词 + BM25（k1=1.5, b=0.75），过滤停用词
 - **融合**：两通道各自排名后 **RRF（Reciprocal Rank Fusion, k=60）** 融合
 - **降级**：embedding 模型不可用（未安装/加载失败）时自动回退纯 BM25，功能不中断
+- **缓存**：检索结果按 (查询, 索引版本) 内存缓存，索引重建自动失效
 - **索引**：JSON 文件带版本号（V3），旧格式首次启动自动重建（`python main.py build` 可强制重建）
+
+> ⚠️ **首次文档问答会稍慢**：语义模型首次加载需要下载权重（约 470MB，下载后缓存到 `models/`）；
+> 网络不可用时自动回退纯 BM25，不影响使用。
 
 ## 多轮记忆（checkpointer）
 
@@ -98,6 +102,10 @@ python -X utf8 main.py web
 `X-API-Token: xxx`，防止本机端口被局域网/他人滥用（防止盗用 API 额度）。
 未配置时保持零配置开放（默认绑定 127.0.0.1）。前端在 ⚙ 设置面板填入 Token 后
 存入浏览器 localStorage。
+
+> ⚠️ **超时语义说明**：`/ask` 超时（默认 60 秒）后立即返回 504，但**模型调用无法被
+> 取消**——请求仍在后台线程继续执行并消耗额度。这是 Python 线程模型的限制，如需严格
+> 取消请改用 asyncio 或子进程隔离。
 
 ## 反思（reflection）
 

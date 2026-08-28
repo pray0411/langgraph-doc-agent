@@ -15,6 +15,7 @@
 import json
 import math
 import re
+import threading
 from collections import Counter
 from pathlib import Path
 
@@ -48,27 +49,32 @@ except ImportError:  # pragma: no cover - 降级路径
     _HAS_JIEBA = False
 
 # embedding 编码器（懒加载单例；不可用时为 None，检索回退纯 BM25）
+# 加锁防并发：web 服务多线程首次查询可能同时触发模型加载
 _encoder = None
 _encoder_loaded = False
+_encoder_lock = threading.Lock()
 
 
 def get_encoder():
-    """获取句子编码器（懒加载）。失败返回 None（调用方回退 BM25）。"""
+    """获取句子编码器（懒加载，线程安全）。失败返回 None（调用方回退 BM25）。"""
     global _encoder, _encoder_loaded
     if _encoder_loaded:
         return _encoder
-    _encoder_loaded = True
-    try:
-        import os
-        os.environ.setdefault("HF_HOME", str(HF_HOME))
-        from sentence_transformers import SentenceTransformer
+    with _encoder_lock:
+        if _encoder_loaded:
+            return _encoder
+        _encoder_loaded = True
+        try:
+            import os
+            os.environ.setdefault("HF_HOME", str(HF_HOME))
+            from sentence_transformers import SentenceTransformer
 
-        _encoder = SentenceTransformer(EMBEDDING_MODEL, cache_folder=str(HF_HOME))
-        print(f"[embedding] 语义检索可用：{EMBEDDING_MODEL}")
-    except Exception as exc:  # noqa: BLE001 - 任何失败都降级
-        print(f"[embedding] 语义检索不可用，回退纯 BM25：{exc}")
-        _encoder = None
-    return _encoder
+            _encoder = SentenceTransformer(EMBEDDING_MODEL, cache_folder=str(HF_HOME))
+            print(f"[embedding] 语义检索可用：{EMBEDDING_MODEL}")
+        except Exception as exc:  # noqa: BLE001 - 任何失败都降级
+            print(f"[embedding] 语义检索不可用，回退纯 BM25：{exc}")
+            _encoder = None
+        return _encoder
 
 
 def encode_texts(texts: list[str]) -> list[list[float]] | None:
@@ -276,6 +282,16 @@ def _cosine(vec_a: list[float], vec_b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+# 检索结果内存缓存：同一查询在索引未变时直接复用（小文档集场景避免重复全量计算）。
+# 索引文件 mtime 变化（重建/新增文档）时自动失效。
+_search_cache: dict[tuple, list[dict]] = {}
+_SEARCH_CACHE_MAX = 128
+
+
+def _cache_key(query: str, top_k: int, min_score: float, index_mtime: float) -> tuple:
+    return (query, top_k, min_score, index_mtime)
+
+
 def search(query: str, top_k: int = 3, min_score: float = MIN_SCORE) -> list[dict]:
     """混合检索：BM25（jieba 分词）+ 语义向量（sentence-transformers）RRF 融合。
 
@@ -283,7 +299,16 @@ def search(query: str, top_k: int = 3, min_score: float = MIN_SCORE) -> list[dic
     - 语义通道可用时：任一通道命中的片段参与 RRF 融合（k=60）
     - 语义通道不可用（索引无向量 / encoder 失败）：回退纯 BM25
     - 返回按融合分数降序的 top_k 个
+    - 结果按 (query, 索引 mtime) 内存缓存，索引重建后自动失效
     """
+    try:
+        index_mtime = INDEX_FILE.stat().st_mtime if INDEX_FILE.exists() else 0.0
+    except OSError:
+        index_mtime = 0.0
+    key = _cache_key(query, top_k, min_score, index_mtime)
+    if key in _search_cache:
+        return _search_cache[key]
+
     data = load_index()
     meta = data["meta"]
     records = data["records"]
@@ -334,4 +359,10 @@ def search(query: str, top_k: int = 3, min_score: float = MIN_SCORE) -> list[dic
             fused.append({"score": round(score, 6), "source": r["source"], "chunk": r["chunk"]})
 
     fused.sort(key=lambda x: x["score"], reverse=True)
-    return fused[:top_k]
+    result = fused[:top_k]
+
+    # 写缓存（简单 FIFO 上限）
+    if len(_search_cache) >= _SEARCH_CACHE_MAX:
+        _search_cache.clear()
+    _search_cache[key] = result
+    return result

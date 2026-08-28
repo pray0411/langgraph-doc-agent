@@ -453,3 +453,92 @@ def test_auth_accepts_correct_token(monkeypatch):
     handler = Handler.__new__(Handler)
     handler.headers = {"X-API-Token": "secret123"}
     assert handler._auth_ok() is True
+
+
+# ---------- 真实 HTTP 契约测试（起真实 ThreadingHTTPServer） ----------
+
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+@pytest.fixture()
+def http_server(monkeypatch, tmp_path):
+    """起一个真实 web 服务（monkeypatch server.ask 避免真实模型调用）。
+
+    返回 (base_url, call_log)，call_log 记录 ask() 收到的参数。
+    """
+    from http.server import ThreadingHTTPServer as _THS
+    import server as server_mod
+
+    call_log = {"args": None}
+
+    def _fake_ask(question, show_log=False, mode=None, history=None, thread_id=None):
+        call_log["args"] = {"question": question, "mode": mode, "thread_id": thread_id}
+        return "测试回答", {"messages": [], "reflection": "{}"}
+
+    monkeypatch.setattr(server_mod, "ask", _fake_ask)
+
+    srv = _THS(("127.0.0.1", 0), server_mod.Handler)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    yield f"http://127.0.0.1:{port}", call_log
+    srv.shutdown()
+
+
+def _http_post(url, body, token=None):
+    data = urllib.parse.urlencode(body).encode()
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    if token:
+        headers["X-API-Token"] = token
+    req = urllib.request.Request(url + "/ask", data=data, method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, r.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8")
+
+
+def test_http_ask_returns_thread_id(http_server):
+    """/ask 真实 HTTP 路径：应返回 answer 与 thread_id（无传入时服务端生成）。"""
+    base, call_log = http_server
+    status, body = _http_post(base, {"question": "你好"})
+    data = json.loads(body)
+    assert status == 200
+    assert data["answer"] == "测试回答"
+    assert data["thread_id"], "应生成并回传 thread_id"
+    assert data["is_new_thread"] is True
+    assert call_log["args"]["question"] == "你好"
+
+
+def test_http_ask_echoes_thread_id(http_server):
+    """/ask 传入 thread_id 时应回显同一 id，且 is_new_thread 为 False。"""
+    base, call_log = http_server
+    status, body = _http_post(base, {"question": "第二问", "thread_id": "abc123"})
+    data = json.loads(body)
+    assert status == 200
+    assert data["thread_id"] == "abc123"
+    assert data["is_new_thread"] is False
+    assert call_log["args"]["thread_id"] == "abc123"
+
+
+def test_http_auth_401_without_token(monkeypatch, tmp_path):
+    """配置 API_TOKEN 后，/ask 无 token 应返回 401（真实 HTTP 契约）。"""
+    monkeypatch.setenv("API_TOKEN", "secret123")
+    from http.server import ThreadingHTTPServer as _THS
+    import server as server_mod
+
+    srv = _THS(("127.0.0.1", 0), server_mod.Handler)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        status, body = _http_post(f"http://127.0.0.1:{port}", {"question": "hi"})
+        assert status == 401
+        assert "API Token" in body
+
+        status2, _ = _http_post(f"http://127.0.0.1:{port}", {"question": "hi"}, token="secret123")
+        assert status2 == 200
+    finally:
+        srv.shutdown()
