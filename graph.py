@@ -56,8 +56,8 @@ class _OfflineTools:
         from config import TOP_K
         from retriever import search as _search
 
-        # 离线模式用更高的阈值，避免"1+1"这种无关问题误命中文档
-        hits = _search(question, top_k=TOP_K, min_score=0.1)
+        # 离线模式用稍高的阈值，避免"1+1"这种无关问题误命中文档
+        hits = _search(question, top_k=TOP_K, min_score=0.05)
         if hits:
             # 文档相关问题：返回检索到的片段
             parts = [
@@ -146,9 +146,9 @@ def ask(
     answer = last.get("content", "") if isinstance(last, dict) else getattr(last, "content", "")
     answer = str(answer)
 
-    # 提取过程日志
+    # 提取过程日志与真实工具调用（基于 AIMessage.tool_calls 元数据，而非字符串猜测）
     log = []
-    tool_calls = []
+    tool_calls = _extract_tool_calls(messages)
     for m in messages:
         role = m.get("role", "") if isinstance(m, dict) else getattr(m, "type", "")
         content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
@@ -156,7 +156,6 @@ def ask(
             log.append(f"[模型] {str(content)[:120]}")
         elif role == "tool":
             log.append(f"[工具调用] {str(content)[:120]}")
-            tool_calls.append(str(content))
 
     # 反思记录：基于实际执行过程生成
     reflection = _build_reflection(question, answer, tool_calls, mode or LLM_PROVIDER)
@@ -167,36 +166,94 @@ def ask(
     return answer, {"answer": answer, "messages": log, "reflection": reflection}
 
 
-def _build_reflection(question: str, answer: str, tool_calls: list[str], mode: str) -> str:
-    """生成反思记录：检查回答是否基于检索/搜索内容（grounded）。
+def _extract_tool_calls(messages: list) -> list[dict]:
+    """从消息序列中提取真实的工具调用记录。
 
-    统计本次问答实际调用了哪些工具、回答是否与工具结果相关，
-    输出结构化的反思 JSON，供前端展示与后续优化。
+    优先使用 AIMessage.tool_calls 元数据（name/args 由模型结构化输出，可靠）；
+    对纯 dict 消息（离线模式）回退为解析 tool 角色消息的文本内容。
+    返回: [{"name": str, "args": dict|str, "result": str}, ...]
+    """
+    calls: list[dict] = []
+    # 第一遍：AIMessage.tool_calls 元数据（在线模式的真实来源）
+    for m in messages:
+        tcs = getattr(m, "tool_calls", None)
+        if not tcs:
+            continue
+        for tc in tcs:
+            name = tc.get("name", "")
+            args = tc.get("args", {})
+            calls.append({"name": name, "args": args, "result": ""})
+
+    # 第二遍：把 tool 角色的结果文本按顺序回填到对应调用
+    results: list[str] = []
+    for m in messages:
+        role = m.get("role", "") if isinstance(m, dict) else getattr(m, "type", "")
+        if role == "tool":
+            content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+            results.append(str(content))
+    for call, result in zip(calls, results):
+        call["result"] = result
+
+    # 离线模式（纯 dict 消息，无 tool_calls）：从 tool 消息文本回退解析
+    if not calls:
+        for m in messages:
+            role = m.get("role", "") if isinstance(m, dict) else getattr(m, "type", "")
+            content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+            if role == "tool":
+                calls.append({"name": "search_documents", "args": {}, "result": str(content)})
+    return calls
+
+
+def _compact(text: str) -> str:
+    """去掉空白后的小写文本，用于字符级连续片段匹配。"""
+    return "".join(str(text).lower().split())
+
+
+def _grounded(answer: str, tool_calls: list[dict]) -> bool:
+    """检查回答是否基于工具结果（grounded）。
+
+    方法：取每个工具结果中最长的连续字符片段（去空白），看是否出现在回答里。
+    片段长度阈值 MIN_GROUND_FRAGMENT（10 字符）排除了"来源"/"文档"这类
+    工具自己格式文本里的噪声词——只要回答确实复用了工具结果的内容就会命中。
+    没有工具调用时返回 False（纯对话，不存在 grounded 概念）。
+    """
+    MIN_GROUND_FRAGMENT = 10
+    answer_c = _compact(answer)
+    for call in tool_calls:
+        result_c = _compact(call.get("result", ""))
+        if len(result_c) < MIN_GROUND_FRAGMENT:
+            continue
+        # 从结果中取最长的连续片段，滑动检测是否在回答中出现
+        for start in range(len(result_c) - MIN_GROUND_FRAGMENT + 1):
+            frag = result_c[start : start + MIN_GROUND_FRAGMENT]
+            if frag in answer_c:
+                return True
+    return False
+
+
+def _build_reflection(question: str, answer: str, tool_calls: list[dict], mode: str) -> str:
+    """生成反思记录：统计真实工具调用，并检查回答是否基于工具结果（grounded）。
+
+    与 V1 不同：工具调用来自 AIMessage.tool_calls 元数据（模型结构化输出），
+    而非在工具返回的格式化文本里搜关键词——那是自我实现的预言。
     """
     import json as _json
 
-    used_doc_search = any("来源" in c or "文档" in c for c in tool_calls)
-    used_web_search = any("链接" in c for c in tool_calls)
-    used_weather = any("°C" in c or "天气" in c for c in tool_calls)
-
-    # grounded 检查：回答是否包含工具返回的关键内容
-    grounded = False
-    for c in tool_calls:
-        # 取工具结果中的关键片段（去掉链接等噪声），看是否出现在回答里
-        sample = c[:200].replace("\n", " ")
-        if len(sample) > 20 and any(word in answer for word in sample.split()[:8]):
-            grounded = True
-            break
+    names = [c["name"] for c in tool_calls if c.get("name")]
+    used_doc_search = any(n == "search_documents" for n in names)
+    used_web_search = any(n == "web_search" for n in names)
+    used_weather = any(n == "get_weather" for n in names)
 
     reflection = {
         "问题": question,
         "运行模式": mode,
         "工具调用数": len(tool_calls),
+        "调用的工具": names,
         "使用文档检索": used_doc_search,
         "使用联网搜索": used_web_search,
         "使用天气查询": used_weather,
-        "回答是否基于工具结果": grounded,
+        "回答是否基于工具结果": _grounded(answer, tool_calls),
         "回答长度": len(answer),
-        "说明": "基于实际执行过程的自动反思（ReAct 循环内模型自主决策）",
+        "说明": "工具调用取自 AIMessage.tool_calls 元数据；grounded 基于回答对工具结果连续片段的复用检查",
     }
     return _json.dumps(reflection, ensure_ascii=False, indent=2)

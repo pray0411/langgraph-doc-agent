@@ -3,5 +3,6 @@ langchain-core==1.5.3
 langchain-openai==1.4.1
 openai==2.53.0
 duckduckgo-search==8.1.1
+jieba==0.42.1
 python-dotenv==1.2.2
 pytest==9.1.1

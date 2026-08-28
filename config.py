@@ -33,7 +33,7 @@ BOCHA_API_KEY = os.getenv("BOCHA_API_KEY", "")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 TOP_K = int(os.getenv("TOP_K", "3"))
-MIN_SCORE = float(os.getenv("MIN_SCORE", "0.05"))  # 检索最低相似度阈值
+MIN_SCORE = float(os.getenv("MIN_SCORE", "0.0"))  # 检索最低分数阈值（BM25 语义：无共现词即 0，视为无关）
 
 INDEX_FILE = INDEX_DIR / "index.json"
 
@@ -69,24 +69,30 @@ PROVIDER_PRESETS = {
 
 # 运行时 API 配置（网页端可动态更换，不写入文件）
 # 结构: {provider: {"api_key": str, "base_url": str, "model": str}}
+# 加锁保护：网页端写（/api/config）与 Agent 读（构建模型时）并发，dict 读写非原子
+import threading as _threading
+
 _runtime_provider_config: dict = {}
+_runtime_config_lock = _threading.Lock()
 
 
 def set_runtime_provider_config(provider: str, api_key: str, base_url: str = "", model: str = ""):
     """设置某 provider 的运行时配置（网页端更换 Key 用）。"""
-    _runtime_provider_config[provider.lower()] = {
-        "api_key": api_key,
-        "base_url": base_url,
-        "model": model,
-    }
+    with _runtime_config_lock:
+        _runtime_provider_config[provider.lower()] = {
+            "api_key": api_key,
+            "base_url": base_url,
+            "model": model,
+        }
 
 
 def get_provider_config(provider: str) -> dict:
     """获取 provider 的有效配置（优先运行时设置，回退预设默认）。"""
     provider = provider.lower()
-    # 运行时设置优先
-    if provider in _runtime_provider_config:
-        return _runtime_provider_config[provider]
+    # 运行时设置优先（持锁读取，避免读到写一半的 dict）
+    with _runtime_config_lock:
+        if provider in _runtime_provider_config:
+            return dict(_runtime_provider_config[provider])
 
     # 回退到预设默认（从环境变量读 Key）
     preset = PROVIDER_PRESETS.get(provider)

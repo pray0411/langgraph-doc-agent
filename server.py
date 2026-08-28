@@ -33,22 +33,26 @@ def _valid_modes() -> list[str]:
 
 
 # 当前运行模式（默认读取 .env 的 LLM_PROVIDER，可通过 /api/mode 动态切换）
-_current_mode = None
+# 加锁保护：ThreadingHTTPServer 会并发处理请求，裸全局变量存在竞态
+_mode_lock = threading.Lock()
+_current_mode: str | None = None
 
 
-def get_mode():
+def get_mode() -> str:
     """获取当前模式，首次调用时从 config 读取默认值。"""
     global _current_mode
-    if _current_mode is None:
-        from config import LLM_PROVIDER
-        _current_mode = LLM_PROVIDER
-    return _current_mode
+    with _mode_lock:
+        if _current_mode is None:
+            from config import LLM_PROVIDER
+            _current_mode = LLM_PROVIDER
+        return _current_mode
 
 
 def set_mode(mode: str):
     """设置当前模式。"""
     global _current_mode
-    _current_mode = mode
+    with _mode_lock:
+        _current_mode = mode
 
 
 def is_ollama_available() -> bool:
@@ -177,9 +181,11 @@ class Handler(BaseHTTPRequestHandler):
             except (json.JSONDecodeError, KeyError, TypeError):
                 history = []
 
-        # 单请求超时：子线程执行，主线程等待，超时返回
-        result_box = {}
-        timer = threading.Timer(REQUEST_TIMEOUT, lambda: result_box.setdefault("timeout", True))
+        # 单请求超时：子线程执行，主线程等待，超时返回。
+        # 用 Event 做完成信号，避免旧版 Timer+setdefault 的竞态：
+        # 旧版在 worker 恰好完成时，timeout 标志可能已被写入，导致"已算出却报超时"。
+        result_box: dict = {}
+        done = threading.Event()
 
         def _run():
             try:
@@ -188,14 +194,16 @@ class Handler(BaseHTTPRequestHandler):
                 result_box["ok"] = (answer, result)
             except Exception:  # noqa: BLE001
                 result_box["error"] = True
+            finally:
+                done.set()
 
-        timer.start()
         worker = threading.Thread(target=_run, daemon=True)
         worker.start()
-        worker.join(timeout=REQUEST_TIMEOUT)
-        timer.cancel()
+        timed_out = not done.wait(timeout=REQUEST_TIMEOUT)
 
-        if "timeout" in result_box:
+        if timed_out:
+            # 注意：worker 是 daemon 线程，超时后无法强制取消模型调用，
+            # 但请求立即返回，不会阻塞后续请求；结果由 daemon 线程自行丢弃。
             self._json({"error": "处理超时，请稍后重试"}, 504)
             return
         if "error" in result_box:
