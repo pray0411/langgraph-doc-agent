@@ -20,8 +20,8 @@
 
 - Python 3.10+：项目主要开发语言。
 - LangGraph：`create_react_agent` 通用 Agent 编排。
-- 检索：本地 **jieba 分词 + BM25** 稀疏检索，无需外部向量数据库，离线可运行。
-- 模型：支持 DeepSeek、OpenAI 及多家 OpenAI 兼容服务商，以及无 API Key 的离线演示模式。
+- 检索：本地 **jieba 分词 + BM25** 稀疏检索，无需外部向量数据库。
+- 模型：支持 DeepSeek、OpenAI 及多家 OpenAI 兼容服务商，也可接本地 Ollama。
 - 服务：Python 标准库 `http.server` 提供网页问答界面，零第三方依赖。
 
 ## 部署与使用
@@ -34,7 +34,6 @@
 ## 配置说明
 
 通过 .env 文件配置模型提供商（LLM_PROVIDER）、API Key、模型名称、检索参数（TOP_K、MIN_SCORE 等）。
-默认使用离线模式，无需任何 API Key 即可完整演示全流程。
 
 ## 目录结构
 

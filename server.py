@@ -3,7 +3,7 @@
 GET  /             -> 问答页面
 GET  /health       -> 健康检查
 GET  /api/mode     -> 获取当前运行模式
-POST /api/mode     -> 切换运行模式（deepseek/openai/offline，无需重启）
+POST /api/mode     -> 切换运行模式（deepseek/openai/ollama，无需重启）
 POST /ask          -> {question} 返回 {answer, log, reflection}
 
 加固措施：
@@ -26,10 +26,10 @@ MAX_BODY = 10 * 1024
 # 单请求超时：60 秒（模型调用 + 工具调用可能较慢）
 REQUEST_TIMEOUT = 60
 
-# 有效在线模式（来自 config 的服务商预设 + ollama/offline）
+# 有效在线模式（来自 config 的服务商预设 + ollama）
 def _valid_modes() -> list[str]:
     from config import PROVIDER_PRESETS
-    return list(PROVIDER_PRESETS.keys()) + ["ollama", "offline"]
+    return list(PROVIDER_PRESETS.keys()) + ["ollama"]
 
 
 # 当前运行模式（默认读取 .env 的 LLM_PROVIDER，可通过 /api/mode 动态切换）
@@ -70,12 +70,11 @@ def is_ollama_available() -> bool:
 
 
 def available_modes() -> list[str]:
-    """返回当前可用的模式列表（在线服务商 + ollama(可用时) + offline）。"""
+    """返回当前可用的模式列表（在线服务商 + ollama(可用时)）。"""
     from config import PROVIDER_PRESETS
     modes = list(PROVIDER_PRESETS.keys())
     if is_ollama_available():
         modes.append("ollama")
-    modes.append("offline")
     return modes
 
 

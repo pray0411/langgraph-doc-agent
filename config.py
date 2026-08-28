@@ -15,7 +15,7 @@ DOCS_DIR = Path(os.getenv("DOCS_DIR", BASE_DIR / "docs"))
 INDEX_DIR = Path(os.getenv("INDEX_DIR", BASE_DIR / "index"))
 
 # 模型
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "offline")  # deepseek / openai / ollama / offline
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek")  # deepseek / openai / qwen / zhipu / moonshot / ollama
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")

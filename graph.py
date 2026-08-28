@@ -28,64 +28,13 @@ class AgentResult(TypedDict, total=False):
     reflection: str
 
 
-class _OfflineTools:
-    """离线模式：不调用模型/网络，用本地检索 + 内置规则回答。
-
-    定位：零依赖可运行的演示模式。
-    - 简单问题（数学/时间/问候/身份）-> 内置规则引擎直接回答
-    - 文档相关问题 -> 返回检索结果片段（含相似度）
-    - 其他 -> 提示离线能力边界，引导切换模式
-    """
-
-    def invoke(self, state: dict) -> dict:
-        question = ""
-        for m in state.get("messages", []):
-            if m.get("role") == "user":
-                question = m.get("content", "")
-                break
-
-        # 1. 先用内置规则引擎回答简单问题（数学/时间/问候等，无需模型）
-        from rule_engine import try_rule_answer
-
-        rule_answer = try_rule_answer(question)
-        if rule_answer:
-            answer = f"[离线演示] {rule_answer}"
-            return {"messages": [{"role": "assistant", "content": answer}]}
-
-        # 2. 规则答不了，尝试文档检索
-        from config import TOP_K
-        from retriever import search as _search
-
-        # 离线模式用稍高的阈值，避免"1+1"这种无关问题误命中文档
-        hits = _search(question, top_k=TOP_K, min_score=0.05)
-        if hits:
-            # 文档相关问题：返回检索到的片段
-            parts = [
-                f"[离线演示] 以下为本地文档检索结果（未调用模型）：",
-                f"命中 {len(hits)} 个片段，最高相似度 {hits[0]['score']:.3f}",
-            ]
-            for i, h in enumerate(hits, 1):
-                parts.append(f"\n[{i}] 来源: {h['source']}\n{h['chunk'][:400]}")
-            answer = "\n".join(parts)
-        else:
-            # 无检索结果：说明离线能力边界
-            answer = (
-                "[离线演示] 离线模式可以回答：\n"
-                "1. 简单问题：数学计算、时间日期、问候\n"
-                "2. 文档相关问题：如'这个项目用什么技术栈？'\n"
-                "当前问题不在上述范围，请换一种问法，或切换到在线模式获得完整能力。"
-            )
-        return {"messages": [{"role": "assistant", "content": answer}]}
-
 def build_agent(mode: str | None = None):
-    """构建通用 Agent。离线模式返回本地检索实现，在线模式用 ReAct Agent。
+    """构建通用 Agent（ReAct 模式）。
 
-    mode: 可选，显式指定模式（deepseek/openai/qwen/zhipu/moonshot/ollama/offline）。
+    mode: 可选，显式指定模式（deepseek/openai/qwen/zhipu/moonshot/ollama）。
     支持运行时动态切换（如网页端按钮切换）。
     """
     provider = (mode or LLM_PROVIDER).lower()
-    if provider == "offline":
-        return _OfflineTools()
 
     from config import OLLAMA_BASE_URL, OLLAMA_MODEL
 
@@ -125,7 +74,7 @@ def ask(
     """对外问答入口：执行一次 Agent 推理，返回 (回答, 结果详情)。
 
     confirmed: 保留的兼容参数。V2 的 ReAct 循环中，模型自主决定是否继续。
-    mode: 可选，动态指定运行模式（deepseek/openai/ollama/offline）。
+    mode: 可选，动态指定运行模式（deepseek/openai/ollama）。
     history: 可选，多轮对话历史 [{"role": "user"/"assistant", "content": str}, ...]。
     """
     agent = build_agent(mode)
@@ -169,12 +118,11 @@ def ask(
 def _extract_tool_calls(messages: list) -> list[dict]:
     """从消息序列中提取真实的工具调用记录。
 
-    优先使用 AIMessage.tool_calls 元数据（name/args 由模型结构化输出，可靠）；
-    对纯 dict 消息（离线模式）回退为解析 tool 角色消息的文本内容。
+    来源：AIMessage.tool_calls 元数据（name/args 由模型结构化输出，可靠）。
     返回: [{"name": str, "args": dict|str, "result": str}, ...]
     """
     calls: list[dict] = []
-    # 第一遍：AIMessage.tool_calls 元数据（在线模式的真实来源）
+    # 第一遍：AIMessage.tool_calls 元数据（真实来源）
     for m in messages:
         tcs = getattr(m, "tool_calls", None)
         if not tcs:
@@ -194,13 +142,6 @@ def _extract_tool_calls(messages: list) -> list[dict]:
     for call, result in zip(calls, results):
         call["result"] = result
 
-    # 离线模式（纯 dict 消息，无 tool_calls）：从 tool 消息文本回退解析
-    if not calls:
-        for m in messages:
-            role = m.get("role", "") if isinstance(m, dict) else getattr(m, "type", "")
-            content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
-            if role == "tool":
-                calls.append({"name": "search_documents", "args": {}, "result": str(content)})
     return calls
 
 

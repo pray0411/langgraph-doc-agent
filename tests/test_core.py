@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-"""测试套件：检索（BM25）、离线模式、工具、配置、反思、服务端超时。
+"""测试套件：检索（BM25）、工具、配置、反思、服务端超时。
 
 运行: python -m pytest tests/ -v
 
 测试设计原则：
 - 不依赖真实网络（天气/搜索工具用 mock）
-- 不依赖真实时间（规则引擎时间分支注入固定时间）
 - 索引构建隔离到临时目录（tmp_path），不污染仓库
 """
 import json
@@ -29,10 +28,10 @@ def _clean_env(tmp_path, monkeypatch):
     monkeypatch.setenv("DOCS_DIR", str(tmp_path / "docs"))
     monkeypatch.setenv("INDEX_DIR", str(tmp_path / "index"))
     # 重新导入相关模块以应用 monkeypatch（config 在 import 时读 env）
-    for mod in ("config", "retriever", "tools", "graph", "rule_engine"):
+    for mod in ("config", "retriever", "tools", "graph"):
         sys.modules.pop(mod, None)
     yield
-    for mod in ("config", "retriever", "tools", "graph", "rule_engine"):
+    for mod in ("config", "retriever", "tools", "graph"):
         sys.modules.pop(mod, None)
 
 
@@ -106,29 +105,6 @@ def test_index_version_upgrade_auto_rebuild(sample_docs, tmp_path):
     assert data["meta"]["version"] == 2
 
 
-# ---------- 离线模式 ----------
-
-def test_offline_mode_no_crash(sample_docs, monkeypatch):
-    """离线模式应能正常返回（不崩溃）。"""
-    monkeypatch.setenv("LLM_PROVIDER", "offline")
-    from graph import ask
-
-    answer, result = ask("核心架构是什么？")
-    assert isinstance(answer, str)
-    assert len(answer) > 0
-    assert "messages" in result
-    assert "reflection" in result
-
-
-def test_offline_mode_returns_retrieval(sample_docs, monkeypatch):
-    """离线模式应返回检索结果（含'离线演示'标记）。"""
-    monkeypatch.setenv("LLM_PROVIDER", "offline")
-    from graph import ask
-
-    answer, _ = ask("这个项目的核心架构是什么？")
-    assert "离线演示" in answer
-
-
 # ---------- 配置 ----------
 
 def test_config_defaults(monkeypatch):
@@ -137,7 +113,7 @@ def test_config_defaults(monkeypatch):
     from config import LLM_PROVIDER, TOP_K
 
     assert TOP_K > 0
-    assert LLM_PROVIDER in ("deepseek", "openai", "offline")
+    assert LLM_PROVIDER in ("deepseek", "openai", "qwen", "zhipu", "moonshot", "ollama")
 
 
 def test_runtime_provider_config_threadsafe(sample_docs):
@@ -318,34 +294,6 @@ def test_ask_timeout_wait_returns_504_semantics():
     timed_out = not done.wait(timeout=0.1)
     assert timed_out is True
     assert "ok" not in result_box
-
-
-# ---------- 规则引擎（离线内置回答） ----------
-
-def test_rule_engine_math():
-    """规则引擎应能计算数学问题。"""
-    from rule_engine import try_rule_answer
-
-    assert try_rule_answer("1+1等于几") == "1+1 = 2"
-    assert try_rule_answer("3*4-2等于多少") == "3*4-2 = 10"
-    assert try_rule_answer("10除以2等于几") == "10/2 = 5"
-    assert try_rule_answer("2乘5加3") == "2*5+3 = 13"
-
-
-def test_rule_engine_greeting():
-    """规则引擎应能回答问候。"""
-    from rule_engine import try_rule_answer
-
-    assert "你好" in try_rule_answer("你好")
-    assert try_rule_answer("谢谢") is not None
-
-
-def test_rule_engine_unknown_returns_none():
-    """无法回答的问题应返回 None（交给检索）。"""
-    from rule_engine import try_rule_answer
-
-    assert try_rule_answer("量子物理和弦理论的区别") is None
-    assert try_rule_answer("什么是不确定性原理") is None
 
 
 # ---------- legacy 归档完整性 ----------

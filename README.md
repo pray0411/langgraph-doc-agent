@@ -41,10 +41,6 @@ python -X utf8 main.py web
 > 改了 `tools.py` / `graph.py` 等代码后，必须停止旧服务（Ctrl+C 或结束进程）
 > 再重新 `python -X utf8 main.py web` 启动，新代码才生效。
 
-> 💡 **离线模式**：不配置任何 API Key（`LLM_PROVIDER=offline`）时，Agent 会用
-> 本地文档检索给出演示回答，适合无 Key 环境验证链路；配置 DeepSeek/OpenAI
-> Key 后获得完整能力（联网搜索、天气、智能对话）。
-
 ## 架构：ReAct 模式
 
 ```
@@ -77,7 +73,7 @@ python -X utf8 main.py web
 
 ## 检索：jieba + BM25
 
-文档问答底层是**本地稀疏检索**（无需外部向量数据库，离线可跑）：
+文档问答底层是**本地稀疏检索**（无需外部向量数据库）：
 
 - **分词**：中文用 [jieba](https://github.com/fxsjy/jieba)（未安装时自动降级为单字+双字 bigram），过滤中文停用词
 - **排序**：BM25（k1=1.5, b=0.75），比旧版 TF-IDF + 余弦相似度对长文档更公平
@@ -98,7 +94,6 @@ langgraph-doc-agent/
 ├── graph.py         # ★ 核心：create_react_agent 通用 Agent + 反思逻辑
 ├── tools.py         # 工具集：search_documents / web_search / get_weather
 ├── retriever.py     # jieba 分词 + BM25 检索（文档问答底层）
-├── rule_engine.py   # 离线模式内置规则回答（数学/时间/问候）
 ├── server.py        # 网页服务（含并发安全与请求超时）
 ├── main.py          # 命令行入口
 ├── config.py        # 配置（含运行时 provider 动态切换，线程安全）
@@ -119,9 +114,9 @@ langgraph-doc-agent/
 python -m pytest tests/ -v
 ```
 
-测试覆盖：BM25 检索（相关/无关/阈值/索引升级）、离线模式、并发配置读写、
+测试覆盖：BM25 检索（相关/无关/阈值/索引升级）、并发配置读写、
 工具降级（网络故障时不崩溃）、真实工具调用提取与 grounded 检查、服务端超时语义。
-测试不依赖真实网络/时间/仓库文件系统（索引隔离到临时目录）。
+测试不依赖真实网络/仓库文件系统（索引隔离到临时目录）。
 
 ## 后续扩展
 
