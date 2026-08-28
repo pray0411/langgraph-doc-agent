@@ -899,7 +899,8 @@ async function ask() {
 
   const { msg, bubble } = addMessage('assistant', '', { raw: true });
   bubble.classList.add('bubble', 'md');
-  bubble.innerHTML = '';
+  // 思考中：气泡内显示转圈 + 文字（首个 token 到达后由 scheduleRender 覆盖）
+  bubble.innerHTML = '<span class="typing-spinner"></span><span class="typing-text">正在思考…</span>';
   let answer = '';
   let sources = [];
   let reflection = '';
