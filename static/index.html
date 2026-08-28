@@ -195,8 +195,8 @@
   .msg-actions button:hover { background: var(--bg-hover); color: var(--text); }
 
   .typing-bubble { display: inline-flex; align-items: center; gap: 10px; padding: 14px 18px; background: var(--bubble-assistant); border-radius: 16px; border-top-left-radius: 4px; }
-  .typing-spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; flex-shrink: 0; }
-  .typing-text { font-size: 13px; color: var(--text-dim); }
+  .typing-spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; flex-shrink: 0; vertical-align: middle; }
+  .typing-text { display: inline-block; font-size: 13px; color: var(--text-dim); vertical-align: middle; }
 
   .input-area { border-top: 1px solid var(--border); padding: 12px 20px 16px; background: var(--bg); }
   .key-panel { max-width: 820px; margin: 0 auto 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-input); display: none; }
