@@ -85,6 +85,8 @@ class Handler(BaseHTTPRequestHandler):
             html = INDEX_HTML.read_text(encoding="utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            # 禁止缓存：index.html 随仓库更新，浏览器缓存旧页面会让用户看不到最新 UI
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(html.encode("utf-8"))
         elif self.path == "/health":
