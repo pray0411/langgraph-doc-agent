@@ -1,8 +1,8 @@
-# LangGraph 通用 AI Agent 项目说明
+# Pray：LangGraph 通用 AI Agent 项目说明
 
 ## 项目简介
 
-本项目是一个基于 LangGraph 构建的通用 AI Agent。用户可以用自然语言提问，Agent 由模型自主决策调用工具完成回答：文档问答（RAG）、联网搜索（天气/新闻）、普通对话。
+**Pray** 是一个基于 LangGraph 构建的通用 AI Agent。用户可以用自然语言提问，Agent 由模型自主决策调用工具完成回答：文档问答（RAG）、联网搜索（天气/新闻）、普通对话。
 
 ## 技术架构
 

@@ -1,6 +1,6 @@
-# 通用 AI Agent（LangGraph ReAct）
+# Pray：通用 AI Agent（LangGraph ReAct）
 
-基于 [LangGraph](https://github.com/langchain-ai/langgraph) 构建的**通用 AI Agent**，能够回答任何问题：文档问答、联网搜索实时信息（天气/新闻）、普通对话，全部由**模型自主决策**调用工具完成。
+基于 [LangGraph](https://github.com/langchain-ai/langgraph) 构建的**通用 AI Agent**——**Pray**，能够回答任何问题：文档问答、联网搜索实时信息（天气/新闻）、普通对话，全部由**模型自主决策**调用工具完成。
 
 > 从"专用文档问答 Agent"升级而来。核心变化：不再用规则判断"该走哪条路"，而是把工具交给模型，由模型自主决定何时调用什么工具（ReAct / Tool-calling 架构，LangGraph 最主流的 Agent 模式）。
 

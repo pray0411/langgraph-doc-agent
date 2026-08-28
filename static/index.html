@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI Agent</title>
+<title>Pray</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: #ffffff; color: #1f2328; height: 100vh; overflow: hidden; }
@@ -73,7 +73,7 @@
 <body>
 <div class="app">
   <header>
-    <div class="logo"><div class="logo-icon">✦</div> AI Agent</div>
+    <div class="logo"><div class="logo-icon">✦</div> Pray</div>
     <div class="header-right">
       <button class="h-btn" id="clearBtn">新对话</button>
     </div>
@@ -205,7 +205,7 @@ function addMessage(role, content) {
   body.className = 'msg-body';
   const name = document.createElement('div');
   name.className = 'msg-name';
-  name.textContent = role === 'user' ? '你' : 'AI Agent';
+  name.textContent = role === 'user' ? '你' : 'Pray';
   const bubble = document.createElement('div');
   bubble.className = 'bubble' + (content.startsWith('⚠') || content.startsWith('请求失败') ? ' error' : '');
   bubble.textContent = content;
@@ -228,7 +228,7 @@ function addTyping() {
   body.className = 'msg-body';
   const name = document.createElement('div');
   name.className = 'msg-name';
-  name.textContent = 'AI Agent';
+  name.textContent = 'Pray';
   const typing = document.createElement('div');
   typing.className = 'typing-bubble';
   typing.innerHTML = '<span></span><span></span><span></span>';

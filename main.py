@@ -30,7 +30,7 @@ def cmd_web(host: str, port: int):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="通用 AI Agent（LangGraph ReAct）")
+    parser = argparse.ArgumentParser(description="Pray：通用 AI Agent（LangGraph ReAct）")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_build = sub.add_parser("build", help="构建文档索引")
