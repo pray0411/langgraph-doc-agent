@@ -167,3 +167,106 @@ def get_weather(city: str) -> str:
         return resp.read().decode("utf-8", errors="replace").strip()
     except Exception as exc:  # noqa: BLE001
         return f"天气查询失败: {exc}（请确认城市名，或稍后重试）"
+
+
+# ---------- 命令执行工具（带安全防护） ----------
+
+# 危险命令黑名单：任何包含这些模式的命令一律拒绝（无需确认）
+# 覆盖：删除/格式化/关机/系统级破坏操作
+_BLOCKED_PATTERNS = [
+    r"\brm\s+-rf\s+[/~]",
+    r"\bdel\s+/[sqf]\s+[a-z]:\\",
+    r"\bformat\s+[a-z]:",
+    r"\bshutdown\b", r"\breboot\b", r"\bhalt\b",
+    r"\bmkfs\b", r"\bdd\s+if=",
+    r"rd\s+/s\s+[a-z]:\\",
+    r"\brmdir\s+/s",
+]
+
+# 高危命令模式：需要用户在前端确认后才执行（confirmed=True）
+# 覆盖：删除文件/目录、移动/重命名、安装包、联网下载、注册表、系统设置
+_HIGH_RISK_PATTERNS = [
+    r"\brm\b", r"\bdel\b", r"\bremove\b", r"\brmdir\b", r"\brmdir\b",
+    r"\bmove\b", r"\bren\b", r"\brename\b", r"\bcopy\b", r"\bxcopy\b", r"\brobocopy\b",
+    r"\bpip\s+install\b", r"\bnpm\s+install\b", r"\bconda\s+install\b",
+    r"\bcurl\b", r"\bwget\b", r"\bInvoke-WebRequest\b",
+    r"\breg\s+", r"\bsc\s+", r"\bnet\s+user\b", r"\bnet\s+localgroup\b",
+    r"\battrib\b", r"\bicacls\b", r"\btaskkill\b",
+]
+
+_COMMAND_TIMEOUT = 30  # 秒
+_MAX_OUTPUT = 2000  # 字符
+
+
+@tool
+def run_command(command: str, confirmed: bool = False) -> str:
+    """执行命令行命令并返回输出（如运行 Python 脚本、查看目录、测试代码）。
+
+    当需要运行/验证刚写好的代码、查看文件列表、执行脚本、安装依赖时调用——
+    例如写完 guess_game.py 后运行 "python guess_game.py" 验证。
+    只在 {cwd} 目录内执行。
+
+    安全机制：
+    - 破坏性命令（rm -rf /、format、shutdown 等）直接拒绝
+    - 高危命令（删除/移动/安装包/联网下载等）需要 confirmed=True 才会执行；
+      未确认时返回 NEED_CONFIRM 标记，由用户在界面确认后再次调用
+    - 30 秒超时自动终止；输出截断到 2000 字符
+
+    Args:
+        command: 要执行的命令字符串（如 "python guess_game.py"）
+        confirmed: 高危命令的用户确认标记（首次调用传 False）
+    """
+    import re
+    import subprocess
+
+    from config import WRITE_DIR
+
+    cwd = str(Path(WRITE_DIR).resolve())
+
+    # 1. 黑名单硬拦截
+    for pat in _BLOCKED_PATTERNS:
+        if re.search(pat, command, re.IGNORECASE):
+            return f"⛔ 已拦截：命令包含破坏性操作（{pat}），禁止执行"
+
+    # 2. 高危命令需要确认
+    is_high_risk = any(re.search(p, command, re.IGNORECASE) for p in _HIGH_RISK_PATTERNS)
+    if is_high_risk and not confirmed:
+        return (
+            "NEED_CONFIRM 需要用户确认：高危命令 "
+            f"[{command}] 是否执行？确认后请用 confirmed=True 重新调用本工具。"
+        )
+
+    # 3. 执行（沙箱目录 + 超时 + 截断）
+    try:
+        proc = subprocess.Popen(
+            command, cwd=cwd, shell=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=_COMMAND_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # 超时：强杀进程树（Windows 用 taskkill /T，Linux 用 kill 组），
+            # 防止 cmd 派生的子进程残留
+            import os
+            try:
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        capture_output=True, timeout=5,
+                    )
+                else:
+                    proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+            return f"⏱ 命令超时（>{_COMMAND_TIMEOUT}s），已终止：{command}"
+        result = proc
+    except Exception as exc:  # noqa: BLE001
+        return f"执行失败: {exc}"
+
+    out = (stdout or "") + (stderr or "")
+    out = out.strip()
+    if len(out) > _MAX_OUTPUT:
+        out = out[:_MAX_OUTPUT] + f"\n…（输出已截断，共 {len(out)} 字符）"
+    status = f"✅ 执行成功（exit {result.returncode}）" if result.returncode == 0 else f"❌ 执行失败（exit {result.returncode}）"
+    return f"{status}\n{out}" if out else status

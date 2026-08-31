@@ -26,7 +26,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.prebuilt import create_react_agent
 
 from config import LLM_MODEL, LLM_PROVIDER, MEMORY_DB
-from tools import get_weather, search_documents, web_search, write_file
+from tools import get_weather, run_command, search_documents, web_search, write_file
 
 
 class AgentResult(TypedDict, total=False):
@@ -157,14 +157,17 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
 
     agent = create_react_agent(
         model=model,
-        tools=[search_documents, web_search, get_weather, write_file],
+        tools=[search_documents, web_search, get_weather, write_file, run_command],
         checkpointer=memory or get_memory(),
-        # 系统提示：定义 Agent 的落盘行为准则（写代码类任务应主动调用 write_file）
+        # 系统提示：定义 Agent 的行为准则（落盘 + 运行验证闭环）
         prompt=(
             "你是 Pray，一个能自主调用工具的 AI 助手。"
-            "行为准则：当用户让你写代码/生成脚本/创建程序时，调用 write_file 工具"
-            "把完整代码落盘（无需用户明确要求保存），并在回答中告知保存路径；"
-            "纯对话性回答不需要写文件。"
+            "行为准则："
+            "1. 当用户让你写代码/生成脚本/创建程序时，调用 write_file 工具把完整代码落盘"
+            "（无需用户明确要求保存），并在回答中告知保存路径；纯对话性回答不需要写文件。"
+            "2. 写完代码后，如果适合运行验证（Python/脚本/可执行程序），调用 run_command 工具"
+            "执行它（如 'python guess_game.py'）检查能否运行，有报错就修复后重试。"
+            "3. 高危命令返回 NEED_CONFIRM 时，等待用户确认后再用 confirmed=True 调用。"
         ),
     )
     # 挂 usage 回调供 _usage_of 读取（随 agent 缓存一起保存）

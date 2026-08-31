@@ -986,6 +986,7 @@ async function ask() {
     let usage = null;
     let cost = null;
     let toolWarns = [];
+    let pendingConfirm = null;  // 高危命令待用户确认 {command, confirmed}
 
     // 流式渲染节流：token 累积，定时刷新（避免每个 token 全量重渲染卡顿）
     let renderTimer = null;
@@ -1029,8 +1030,13 @@ async function ask() {
         } else if (ev.type === 'tool_done') {
           // 工具完成，恢复"正在思考"（模型继续推理下一段回答）
           if (thinkingText) thinkingText.textContent = '正在思考…';
-          // 工具失败信息透传：结果含失败/错误字样时显示警告
+          // 高危命令待确认：工具返回 NEED_CONFIRM，收集命令供结束后弹窗
           const r = (ev.result || '').trim();
+          const confirmMatch = r.match(/NEED_CONFIRM 需要用户确认：高危命令 \[([^\]]+)\]/);
+          if (confirmMatch) {
+            pendingConfirm = { command: confirmMatch[1] };
+          }
+          // 工具失败信息透传：结果含失败/错误字样时显示警告
           if (r && /失败|错误|无法|没有搜索|查无|超时|error|fail/i.test(r)) {
             toolWarns.push(r.slice(0, 80));
             const warn = document.createElement('div');
@@ -1061,6 +1067,24 @@ async function ask() {
     if (thinkingHint) thinkingHint.remove();
     flushRender();
     if (!answer) bubble.textContent = '（无回答）';
+
+    // 高危命令待确认：弹窗询问用户，确认后自动续问执行
+    if (pendingConfirm) {
+      const cmd = pendingConfirm.command;
+      const allow = confirm('⚠️ AI 想执行高危命令：\n\n' + cmd + '\n\n是否允许执行？');
+      if (allow) {
+        // 用户确认：追加一条"确认执行"消息，重新触发流式问答（AI 会用 confirmed=True 重试）
+        addMessage('user', '✅ 已确认执行命令：' + cmd);
+        // 复用当前 thread_id 续问
+        const q = '请继续执行命令：' + cmd + '（用户已确认，直接用 confirmed=True 调用 run_command）';
+        input.value = q;
+        ask();
+        return;  // 让新的 ask() 接管渲染
+      } else {
+        addMessage('assistant', '⛔ 已拒绝执行高危命令：' + cmd, { raw: true });
+        toast('已拒绝高危命令');
+      }
+    }
 
     // 渲染来源卡片
     if (sources && sources.length) {

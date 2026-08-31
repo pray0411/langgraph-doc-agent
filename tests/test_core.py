@@ -952,3 +952,47 @@ def test_write_file_rejects_path_escape(monkeypatch, tmp_path):
     assert "拒绝" in r2
     # 目录内不应产生文件
     assert list(tmp_path.iterdir()) == []
+
+
+# ---------- run_command 命令工具 ----------
+
+def test_run_command_executes_normal_command(monkeypatch, tmp_path):
+    """普通命令应直接执行并返回输出。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    from tools import run_command
+
+    r = run_command.invoke({"command": sys.executable + " -c \"print('cmd-ok')\"", "confirmed": False})
+    assert "执行成功" in r
+    assert "cmd-ok" in r
+
+
+def test_run_command_high_risk_requires_confirm(monkeypatch, tmp_path):
+    """高危命令未确认时应返回 NEED_CONFIRM。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    from tools import run_command
+
+    r = run_command.invoke({"command": "del somefile.py", "confirmed": False})
+    assert "NEED_CONFIRM" in r
+
+
+def test_run_command_high_risk_runs_when_confirmed(monkeypatch, tmp_path):
+    """高危命令确认后应执行。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    from tools import run_command
+
+    r = run_command.invoke({"command": sys.executable + " -c \"print('ok')\"", "confirmed": True})
+    assert "执行成功" in r
+
+
+def test_run_command_blocks_destructive(monkeypatch, tmp_path):
+    """黑名单破坏性命令即使 confirmed=True 也拒绝。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    from tools import run_command
+
+    for cmd in ("rm -rf /", "format C:", "shutdown /s"):
+        r = run_command.invoke({"command": cmd, "confirmed": True})
+        assert "拦截" in r, f"应拦截: {cmd}"
