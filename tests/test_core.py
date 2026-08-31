@@ -1036,3 +1036,18 @@ def test_run_command_no_input_fails_fast(monkeypatch, tmp_path):
     })
     # 应快速失败（EOFError），而非 30 秒超时
     assert "执行失败" in r or "EOFError" in r
+
+
+def test_run_command_utf8_output_no_mojibake(monkeypatch, tmp_path):
+    """中文输出不应乱码（强制子进程 UTF-8 编码）。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    from tools import run_command, write_file
+
+    write_file.invoke({"file_path": "zh.py", "content": "print('中文测试：你好世界')\n"})
+    r = run_command.invoke({
+        "command": sys.executable + " zh.py",
+        "input_text": "",
+        "confirmed": False,
+    })
+    assert "你好世界" in r, f"中文不应乱码: {r[:80]}"

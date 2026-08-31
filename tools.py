@@ -244,12 +244,20 @@ def run_command(command: str, input_text: str = "", confirmed: bool = False) -> 
         )
 
     # 3. 执行（沙箱目录 + 超时 + 截断 + 标准输入）
+    import os
+
+    # 强制子进程 UTF-8 输出：Windows 下 Python 默认 GBK 输出中文，
+    # 与 subprocess 的 utf-8 解码不一致会导致乱码
+    env = dict(os.environ)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
     try:
         proc = subprocess.Popen(
             command, cwd=cwd, shell=True,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
+            env=env,
         )
         try:
             # 通过 stdin 喂输入（交互式程序必需）；无输入时传空串立即关闭 stdin
@@ -257,7 +265,6 @@ def run_command(command: str, input_text: str = "", confirmed: bool = False) -> 
         except subprocess.TimeoutExpired:
             # 超时：强杀进程树（Windows 用 taskkill /T，Linux 用 kill 组），
             # 防止 cmd 派生的子进程残留
-            import os
             try:
                 if os.name == "nt":
                     subprocess.run(
