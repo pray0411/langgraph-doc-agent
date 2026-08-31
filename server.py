@@ -10,6 +10,10 @@ POST /api/mode     -> 切换运行模式（deepseek/openai/ollama，无需重启
 POST /api/config   -> 运行时更换 API Key / 模型配置
 POST /ask          -> {question, thread_id?} 返回 {answer, log, reflection, sources, thread_id}
 POST /ask/stream   -> SSE 流式问答（token 增量 + 工具状态 + 最终 sources）
+POST /api/run/start -> 启动交互式终端进程（{command} -> {session_id}）
+POST /api/run/input -> 向终端进程写入输入（{session_id, text}）
+GET  /api/run/output?session_id= -> 轮询终端新输出
+POST /api/run/stop  -> 终止终端进程
 
 加固措施：
 - 请求体大小限制（MAX_BODY，防止超大请求）
@@ -133,6 +137,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._handle_session_messages(thread_id)
                 return
             self.send_error(404)
+        elif self.path.startswith("/api/run/output"):
+            if not self._auth_required():
+                return
+            self._handle_run_output()
         else:
             self.send_error(404)
 
@@ -168,6 +176,26 @@ class Handler(BaseHTTPRequestHandler):
             if not self._auth_required():
                 return
             self._handle_ask_stream()
+            return
+        if self.path == "/api/run/start":
+            if not self._auth_required():
+                return
+            self._handle_run_start()
+            return
+        if self.path == "/api/run/input":
+            if not self._auth_required():
+                return
+            self._handle_run_input()
+            return
+        if self.path == "/api/run/stop":
+            if not self._auth_required():
+                return
+            self._handle_run_stop()
+            return
+        if self.path == "/api/run/write":
+            if not self._auth_required():
+                return
+            self._handle_run_write()
             return
         self.send_error(404)
 
@@ -336,6 +364,90 @@ class Handler(BaseHTTPRequestHandler):
 
         delete_session(thread_id)
         self._json({"ok": True, "thread_id": thread_id})
+
+    def _read_form(self) -> dict:
+        """读取表单并限制大小。失败返回 {}。"""
+        length = int(self.headers.get("Content-Length", 0))
+        if length > MAX_BODY:
+            return {}
+        try:
+            body = self.rfile.read(length).decode("utf-8", errors="replace")
+            return parse_qs(body)
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _handle_run_start(self):
+        """启动交互式子进程，返回 session_id。"""
+        import runterm
+
+        data = self._read_form()
+        command = (data.get("command") or [""])[0].strip()
+        if not command:
+            self._json({"error": "命令不能为空"}, 400)
+            return
+        result = runterm.start(command)
+        if "error" in result:
+            self._json(result, 400)
+            return
+        self._json(result)
+
+    def _handle_run_input(self):
+        """向交互式子进程 stdin 写入输入。"""
+        import runterm
+
+        data = self._read_form()
+        session_id = (data.get("session_id") or [""])[0].strip()
+        text = (data.get("text") or [""])[0]
+        if not session_id:
+            self._json({"error": "缺少 session_id"}, 400)
+            return
+        self._json(runterm.send_input(session_id, text))
+
+    def _handle_run_output(self):
+        """轮询拉取子进程新输出。"""
+        import runterm
+        from urllib.parse import urlparse, parse_qs as _pq
+
+        qs = _pq(urlparse(self.path).query)
+        session_id = (qs.get("session_id") or [""])[0]
+        if not session_id:
+            self._json({"error": "缺少 session_id"}, 400)
+            return
+        self._json(runterm.poll(session_id))
+
+    def _handle_run_stop(self):
+        """终止交互式子进程。"""
+        import runterm
+
+        data = self._read_form()
+        session_id = (data.get("session_id") or [""])[0].strip()
+        if not session_id:
+            self._json({"error": "缺少 session_id"}, 400)
+            return
+        self._json(runterm.stop(session_id))
+
+    def _handle_run_write(self):
+        """把代码写入 generated/ 临时文件（交互终端用），带路径安全校验。"""
+        from pathlib import Path
+        from config import WRITE_DIR
+
+        data = self._read_form()
+        path = (data.get("path") or [""])[0].strip()
+        content = (data.get("content") or [""])[0]
+        if not path:
+            self._json({"error": "缺少 path"}, 400)
+            return
+        write_root = Path(WRITE_DIR).resolve()
+        target = (write_root / path).resolve()
+        if not target.is_relative_to(write_root):
+            self._json({"error": "路径超出允许目录"}, 400)
+            return
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            self._json({"ok": True, "path": str(target)})
+        except OSError as exc:
+            self._json({"error": f"写入失败: {exc}"}, 500)
 
     def _json(self, obj, code=200):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")

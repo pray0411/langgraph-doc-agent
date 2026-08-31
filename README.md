@@ -25,6 +25,11 @@
 >   （工具返回 NEED_CONFIRM → 界面弹窗 → 确认后续问）
 > - 只在 `generated/` 目录内执行；30 秒超时强杀；输出截断 2000 字符
 
+> **🖥 交互终端**：代码块「▶ 运行」支持所有可执行语言——HTML 在 iframe 中运行，
+> Python/JS/Shell 在**交互终端**中运行（真实 stdin/stdout：程序输出实时显示，
+> 你在输入框打字即可操作程序）。终端弹窗由 `/api/run/start|input|output|stop`
+> 驱动（子进程 + 轮询），复用黑名单安全校验，关闭弹窗自动终止进程。
+
 ## 快速开始
 
 ```bash
@@ -157,6 +162,7 @@ langgraph-doc-agent/
 ├── tools.py         # 工具集：search_documents / web_search / get_weather / write_file / run_command
 ├── retriever.py     # jieba+BM25 + embedding 语义的 RRF 混合检索
 ├── server.py        # 网页服务（并发安全、请求超时、API Token 鉴权）
+├── runterm.py       # 交互终端会话（子进程管理：启动/输入/输出/停止）
 ├── main.py          # 命令行入口
 ├── config.py        # 配置（运行时 provider 动态切换、记忆/检索/鉴权配置）
 ├── legacy/          # V1 历史存档（graph_v1.py / llm.py），不参与运行

@@ -186,6 +186,22 @@
   .run-modal-close:hover { background: var(--bg-hover); color: var(--text); }
   .run-modal iframe { flex: 1; border: none; width: 100%; background: #fff; }
 
+  /* ===== 交互终端弹窗 ===== */
+  .term-modal { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; z-index: 100; animation: fadeIn .15s ease; }
+  .term-modal-body { width: min(94vw, 720px); height: min(88vh, 600px); background: #1e1e1e; border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 12px 40px rgba(0,0,0,.5); }
+  .term-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; background: #2d2d2d; color: #ccc; font-size: 13px; font-weight: 600; border-bottom: 1px solid #444; }
+  .term-modal-close { border: none; background: none; color: #999; font-size: 16px; cursor: pointer; padding: 2px 6px; border-radius: 5px; }
+  .term-modal-close:hover { background: #444; color: #fff; }
+  .term-output { flex: 1; overflow-y: auto; padding: 12px 14px; font-family: Consolas, "Courier New", monospace; font-size: 13px; line-height: 1.6; color: #d4d4d4; white-space: pre-wrap; word-break: break-all; }
+  .term-output .term-end { color: #888; }
+  .term-input-row { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: #2d2d2d; border-top: 1px solid #444; }
+  .term-input-row .prompt { color: #4ec9b0; font-family: Consolas, monospace; font-size: 13px; flex-shrink: 0; }
+  .term-input-row input { flex: 1; background: transparent; border: none; outline: none; color: #d4d4d4; font-family: Consolas, monospace; font-size: 13px; }
+  .term-input-row input:disabled { color: #666; }
+  .term-send { border: 1px solid #4ec9b0; background: transparent; color: #4ec9b0; font-size: 12px; padding: 4px 12px; border-radius: 6px; cursor: pointer; flex-shrink: 0; }
+  .term-send:hover { background: #4ec9b0; color: #1e1e1e; }
+  .term-send:disabled { border-color: #666; color: #666; cursor: not-allowed; }
+
   /* ===== 工具状态 ===== */
   .tool-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-dim); margin: 2px 0; }
   .tool-status .spin { width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
@@ -455,16 +471,18 @@ function renderCodeBlock(code, lang) {
   const safe = esc(code);
   const lineCount = code.split('\n').length;
   const langLabel = (lang || 'code').toLowerCase();
-  // HTML 代码块（含 <html>/<!DOCTYPE> 或 lang 含 html）→ 摘要行显示『▶ 运行』按钮
-  // （始终可见，代码折叠时也能直接运行）
+  // HTML 代码块 → iframe 运行；可执行语言（python/js/sh 等）→ 交互终端运行
   const isHtml = langLabel.includes('html')
     || /<!doctype|<html[\s>]|<script[\s>]/i.test(code);
+  const isRunable = isHtml || /^(python|py|javascript|js|bash|shell|sh|node|go|rust|java|c|cpp)$/.test(langLabel);
   let runBtn = '';
   if (isHtml) {
-    runBtn = '<button class="code-run" data-code="' + id + '">▶ 运行</button>';
+    runBtn = '<button class="code-run" data-code="' + id + '" data-mode="iframe" title="浏览器中运行">▶ 运行</button>';
+  } else if (isRunable) {
+    // Python 等：交互终端运行（真实输入输出）
+    runBtn = '<button class="code-run" data-code="' + id + '" data-mode="term" title="交互终端中运行">▶ 运行</button>';
   } else if (lang) {
-    // 其他语言（python 等）：提示不可在浏览器直接运行
-    runBtn = '<span class="code-run-hint" title="浏览器无法直接运行 ' + esc(lang) + '，如需可玩版本请让 AI 用 HTML 写">' + esc(lang) + ' ⚠</span>';
+    runBtn = '<span class="code-run-hint" title="该语言暂不支持直接运行">' + esc(lang) + '</span>';
   }
   // 默认折叠：摘要行 = 语言 + 行数 + 运行按钮 + 展开提示；点开显示完整代码与复制按钮
   return '<details class="code-block">' +
@@ -1197,7 +1215,7 @@ document.addEventListener('click', (e) => {
   navigator.clipboard.writeText(code).then(() => toast('代码已复制'));
 });
 
-// HTML 代码块"运行"按钮：沙箱 iframe 渲染，用户可直接在页面中游玩
+// 代码块"运行"按钮：HTML → iframe；Python 等 → 交互终端
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.code-run');
   if (!btn) return;
@@ -1208,8 +1226,14 @@ document.addEventListener('click', (e) => {
   const pre = details ? details.querySelector('pre') : null;
   const code = pre ? pre.querySelector('code').textContent : '';
   if (!code) return;
+  const mode = btn.getAttribute('data-mode') || 'iframe';
 
-  // 已有弹窗则先关闭
+  if (mode === 'term') {
+    openTerminal(code, btn.getAttribute('data-code') || '');
+    return;
+  }
+
+  // iframe 模式（HTML）
   const old = document.querySelector('.run-modal');
   if (old) old.remove();
 
@@ -1241,6 +1265,112 @@ document.addEventListener('click', (e) => {
   const escHandler = (ev) => { if (ev.key === 'Escape') { modal.remove(); document.removeEventListener('keydown', escHandler); } };
   document.addEventListener('keydown', escHandler);
 });
+
+// 交互终端：把代码写成临时文件，服务端启动子进程，轮询收发
+function openTerminal(code, codeId) {
+  const old = document.querySelector('.term-modal');
+  if (old) old.remove();
+
+  const modal = document.createElement('div');
+  modal.className = 'term-modal';
+  modal.innerHTML =
+    '<div class="term-modal-body">' +
+      '<div class="term-modal-head"><span>🖥 交互终端</span>' +
+        '<button class="term-modal-close" title="关闭">✕</button></div>' +
+      '<div class="term-output"></div>' +
+      '<div class="term-input-row">' +
+        '<span class="prompt">❯</span>' +
+        '<input type="text" placeholder="输入后回车发送…" autocomplete="off">' +
+        '<button class="term-send">发送</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(modal);
+
+  const outEl = modal.querySelector('.term-output');
+  const inputEl = modal.querySelector('input');
+  const sendBtn = modal.querySelector('.term-send');
+
+  function print(text) {
+    const pre = document.createElement('div');
+    pre.textContent = text;
+    outEl.appendChild(pre);
+    outEl.scrollTop = outEl.scrollHeight;
+  }
+
+  async function api(url, body) {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
+      body: body ? new URLSearchParams(body).toString() : '',
+    });
+    return resp.json();
+  }
+
+  // 把代码临时落盘（写进 generated/ 的临时文件，供子进程执行）
+  const ext = { 'python': 'py', 'py': 'py', 'javascript': 'js', 'js': 'js', 'bash': 'sh', 'sh': 'sh', 'node': 'js' }[(codeId || '')] || 'py';
+  const tmpName = 'term_' + Date.now().toString(36) + '.' + ext;
+
+  (async () => {
+    // 1. 把代码写入 generated/ 临时文件（供子进程执行）
+    const fileData = new URLSearchParams({ path: tmpName, content: code }).toString();
+    const wr = await fetch('/api/run/write', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
+      body: fileData,
+    });
+    if (!wr.ok) { print('⚠️ 无法写入临时文件'); return; }
+
+    // 2. 启动进程
+    const langKey = (codeId || '').toLowerCase();
+    const cmd = langKey.includes('js') ? 'node ' + tmpName
+      : langKey.includes('sh') ? tmpName
+      : 'python ' + tmpName;
+    const startResp = await api('/api/run/start', { command: cmd });
+    if (startResp.error) { print(startResp.error); return; }
+    const sid = startResp.session_id;
+    print('$ ' + cmd + '\n');
+
+    // 3. 轮询输出
+    let stopped = false;
+    async function pollLoop() {
+      while (!stopped) {
+        try {
+          const resp = await fetch('/api/run/output?session_id=' + encodeURIComponent(sid), { headers: authHeaders({}) });
+          const data = await resp.json();
+          if (data.lines && data.lines.length) print(data.lines.join(''));
+          if (data.running === false) {
+            print('\n[进程已结束 exit ' + (data.exit_code ?? '?') + ']');
+            inputEl.disabled = true;
+            sendBtn.disabled = true;
+            stopped = true;
+            return;
+          }
+        } catch (err) { /* 忽略瞬时错误 */ }
+        await new Promise(r => setTimeout(r, 300));
+      }
+    }
+    pollLoop();
+
+    // 4. 输入
+    function sendInput() {
+      const text = inputEl.value;
+      if (!text) return;
+      inputEl.value = '';
+      api('/api/run/input', { session_id: sid, text }).catch(() => {});
+      print('❯ ' + text + '\n');
+    }
+    inputEl.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') sendInput(); });
+    sendBtn.addEventListener('click', sendInput);
+    inputEl.focus();
+
+    // 5. 关闭时停止进程
+    const close = () => { stopped = true; api('/api/run/stop', { session_id: sid }).catch(() => {}); modal.remove(); };
+    modal.querySelector('.term-modal-close').addEventListener('click', close);
+    modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
+    const escHandler = (ev) => { if (ev.key === 'Escape') close(); document.removeEventListener('keydown', escHandler); };
+    document.addEventListener('keydown', escHandler);
+  })();
+}
 
 loadMode();
 loadSessions();

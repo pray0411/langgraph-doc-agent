@@ -1051,3 +1051,51 @@ def test_run_command_utf8_output_no_mojibake(monkeypatch, tmp_path):
         "confirmed": False,
     })
     assert "你好世界" in r, f"中文不应乱码: {r[:80]}"
+
+
+# ---------- 交互终端（runterm） ----------
+
+def test_runterm_interactive_flow(monkeypatch, tmp_path):
+    """runterm 应支持启动→输入→输出→退出 的完整交互。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    from runterm import start, send_input, poll, stop
+
+    (tmp_path / "inter.py").write_text(
+        "print('ready')\n"
+        "line = input('>> ').strip()\n"
+        "print(f'got: {line}')\n"
+        "line = input('>> ').strip()\n"
+        "print(f'bye')\n",
+        encoding="utf-8",
+    )
+
+    r = start(sys.executable + " inter.py")
+    assert "session_id" in r
+    sid = r["session_id"]
+
+    import time
+    time.sleep(1)
+    out = poll(sid)
+    assert any("ready" in l for l in out["lines"]), f"应有初始输出: {out}"
+
+    send_input(sid, "hello")
+    time.sleep(1)
+    out2 = poll(sid)
+    assert any("got: hello" in l for l in out2["lines"]), f"应回显输入: {out2}"
+
+    send_input(sid, "x")
+    time.sleep(1)
+    out3 = poll(sid)
+    assert out3["running"] is False, "进程应结束"
+    stop(sid)
+
+
+def test_runterm_blocks_destructive(monkeypatch, tmp_path):
+    """runterm 黑名单应拦截破坏性命令。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    from runterm import start
+
+    r = start("rm -rf /")
+    assert "error" in r and "拦截" in r["error"]
