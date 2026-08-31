@@ -20,6 +20,7 @@ POST /api/run/stop  -> 终止终端进程
 - 单请求超时（timeout 线程 + 信号式检查）
 - 错误信息脱敏（不向客户端暴露内部异常细节）
 """
+import base64
 import json
 import queue
 import threading
@@ -27,7 +28,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from graph import ask
 
@@ -40,6 +41,11 @@ REQUEST_TIMEOUT = 60
 # SSE 流式闲置超时：60 秒内无任何事件推送（token/工具状态）即判定卡死，
 # 推 error 事件并断流——防止模型调用或工具挂起时前端"正在思考"无限转圈。
 SSE_IDLE_TIMEOUT = 60
+# 上传文档：单文件上限 5 MB（base64 后请求体约 6.7 MB，body 上限放宽到 8 MB）
+UPLOAD_MAX_FILE = 5 * 1024 * 1024
+UPLOAD_MAX_BODY = 8 * 1024 * 1024
+# 上传文档允许的扩展名（与 retriever.SUPPORTED_EXTS 保持一致）
+UPLOAD_EXTS = {".md", ".txt", ".py", ".rst", ".html"}
 
 # 有效在线模式（来自 config 的服务商预设 + ollama）
 def _valid_modes() -> list[str]:
@@ -179,6 +185,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._handle_session_messages(thread_id)
                 return
             self.send_error(404)
+        elif self.path == "/api/uploads":
+            if not self._auth_required():
+                return
+            self._handle_uploads_list()
         elif self.path.startswith("/api/run/output"):
             if not self._auth_required():
                 return
@@ -199,6 +209,13 @@ class Handler(BaseHTTPRequestHandler):
             thread_id = self.path[len(prefix):]
             if thread_id:
                 self._handle_delete_session(thread_id)
+                return
+        # 形如 /api/uploads/<name>
+        uprefix = "/api/uploads/"
+        if self.path.startswith(uprefix):
+            name = unquote(self.path[len(uprefix):])
+            if name:
+                self._handle_upload_delete(name)
                 return
         self.send_error(404)
 
@@ -247,6 +264,11 @@ class Handler(BaseHTTPRequestHandler):
             if not self._auth_required():
                 return
             self._handle_approve()
+            return
+        if self.path == "/api/upload":
+            if not self._auth_required():
+                return
+            self._handle_upload()
             return
         self.send_error(404)
 
@@ -448,6 +470,125 @@ class Handler(BaseHTTPRequestHandler):
 
         delete_session(thread_id)
         self._json({"ok": True, "thread_id": thread_id})
+
+    # ---------- 文档上传 ----------
+
+    def _upload_dir(self) -> Path:
+        """上传文件目录：WRITE_DIR/uploads/（不存在则创建）。"""
+        from config import WRITE_DIR
+
+        d = Path(WRITE_DIR).resolve() / "uploads"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @staticmethod
+    def _clean_upload_name(name: str) -> str:
+        """清洗上传文件名：拒绝路径分隔符/相对路径，仅保留合法 basename 与允许的扩展名。"""
+        raw = name or ""
+        # 先拒绝任何路径成分（/ \ ..），再取 basename，杜绝 ../../evil.md 逃逸
+        if not raw or raw in (".", "..") or "/" in raw or "\\" in raw or raw.startswith("."):
+            return None
+        if Path(raw).suffix.lower() not in UPLOAD_EXTS:
+            return None
+        return raw
+
+    def _handle_upload(self):
+        """接收上传文档（name + base64 content），保存并加入检索索引。"""
+        length = int(self.headers.get("Content-Length", 0))
+        if length > UPLOAD_MAX_BODY:
+            self._json({"error": "上传文件过大（上限 5 MB）"}, 413)
+            return
+        try:
+            body = self.rfile.read(length).decode("utf-8", errors="replace")
+            data = parse_qs(body)
+        except Exception:  # noqa: BLE001
+            self._json({"error": "请求体解析失败"}, 400)
+            return
+
+        name = self._clean_upload_name((data.get("name") or [""])[0])
+        if not name:
+            self._json({"error": f"文件名不合法或扩展名不受支持（仅支持 {'/'.join(sorted(UPLOAD_EXTS))}）"}, 400)
+            return
+        try:
+            content = base64.b64decode((data.get("content") or [""])[0], validate=True)
+        except Exception:  # noqa: BLE001
+            self._json({"error": "文件内容编码无效"}, 400)
+            return
+        if not content:
+            self._json({"error": "文件内容为空"}, 400)
+            return
+        if len(content) > UPLOAD_MAX_FILE:
+            self._json({"error": "上传文件过大（上限 5 MB）"}, 413)
+            return
+
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            self._json({"error": "仅支持 UTF-8 文本文件（.md/.txt/.py/.rst/.html）"}, 400)
+            return
+
+        from retriever import add_uploaded_file
+
+        target = self._upload_dir() / name
+        try:
+            target.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            self._json({"error": f"保存失败: {exc}"}, 500)
+            return
+        chunks = add_uploaded_file(name, text)
+        self._json({
+            "ok": True,
+            "name": name,
+            "size": len(content),
+            "chunks": chunks,
+            "message": f"已上传 {name}（{len(content)} 字节，{chunks} 个片段），可直接提问基于该文档的问题",
+        })
+
+    def _handle_uploads_list(self):
+        """列出已上传文档（含内存索引片段数与磁盘大小）。"""
+        import os
+
+        from retriever import list_uploaded_files
+
+        indexed = {u["name"]: u["chunks"] for u in list_uploaded_files()}
+        items = []
+        for p in sorted(self._upload_dir().glob("*")):
+            if not p.is_file():
+                continue
+            try:
+                size = p.stat().st_size
+                mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(p.stat().st_mtime))
+            except OSError:
+                size, mtime = 0, ""
+            items.append({
+                "name": p.name,
+                "size": size,
+                "chunks": indexed.get(p.name, 0),
+                "uploaded_at": mtime,
+            })
+        self._json({"uploads": items})
+
+    def _handle_upload_delete(self, name: str):
+        """删除已上传文档（磁盘文件 + 内存索引）。"""
+        cleaned = self._clean_upload_name(name)
+        if not cleaned:
+            self._json({"error": "文件名不合法"}, 400)
+            return
+        from retriever import remove_uploaded_file
+
+        target = self._upload_dir() / cleaned
+        removed_index = remove_uploaded_file(cleaned)
+        removed_file = False
+        try:
+            if target.exists():
+                target.unlink()
+                removed_file = True
+        except OSError:
+            pass
+        if not (removed_index or removed_file):
+            self._json({"error": f"未找到上传文档 {cleaned}"}, 404)
+            return
+        self._json({"ok": True, "name": cleaned, "message": f"已删除 {cleaned}"})
 
     def _read_form(self) -> dict:
         """读取表单并限制大小。失败返回 {}。"""

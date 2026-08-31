@@ -7,6 +7,7 @@
 - 不依赖真实网络（天气/搜索工具用 mock）
 - 索引构建隔离到临时目录（tmp_path），不污染仓库
 """
+import base64
 import json
 import os
 import sys
@@ -106,6 +107,43 @@ def test_index_version_upgrade_auto_rebuild(sample_docs, tmp_path):
     data = load_index()
     assert "meta" in data
     assert data["meta"]["version"] == 3
+
+
+# ---------- 上传文档（内存增量索引） ----------
+
+def test_uploaded_file_indexed_and_searched(sample_docs, tmp_path):
+    """上传文档应进入检索（source 带 uploads/ 前缀），删除后不再命中。"""
+    import retriever as retriever_mod
+    from retriever import add_uploaded_file, remove_uploaded_file, search
+
+    add_uploaded_file("笔记.md", "Pray 上传文档测试：西瓜是夏天的水果。")
+    try:
+        hits = search("西瓜是什么水果", top_k=3)
+        assert hits, "上传文档应被检索到"
+        assert any("uploads/笔记.md" in h["source"] for h in hits), hits
+    finally:
+        remove_uploaded_file("笔记.md")
+    hits2 = search("西瓜是什么水果", top_k=3)
+    assert not any("uploads/笔记.md" in h["source"] for h in hits2)
+
+
+def test_uploaded_file_replace_and_list(sample_docs):
+    """同名上传应替换旧内容；list_uploaded_files 应返回名称与片段数。"""
+    from retriever import add_uploaded_file, list_uploaded_files, remove_uploaded_file
+
+    add_uploaded_file("a.md", "第一版内容：甲。")
+    add_uploaded_file("b.md", "第二份文档：乙。")
+    try:
+        names = {u["name"] for u in list_uploaded_files()}
+        assert names == {"a.md", "b.md"}
+        # 同名替换：a.md 内容更新，chunks 数不变（仍 1 个片段）
+        add_uploaded_file("a.md", "替换后的内容：甲甲甲。")
+        names2 = {u["name"] for u in list_uploaded_files()}
+        assert names2 == {"a.md", "b.md"}
+        assert all(u["chunks"] >= 1 for u in list_uploaded_files())
+    finally:
+        remove_uploaded_file("a.md")
+        remove_uploaded_file("b.md")
 
 
 # ---------- 检索（语义混合） ----------
@@ -806,6 +844,79 @@ def test_http_sse_idle_timeout_emits_error(http_server, monkeypatch):
     status, body = _sse_post(base, "挂起测试")
     assert status == 200
     assert "响应超时" in body, f"应收到超时 error 事件: {body[:200]}"
+
+
+# ---------- 文档上传（真实 HTTP） ----------
+
+def test_http_upload_list_delete(http_server, tmp_path, monkeypatch):
+    """真实 HTTP：上传 → 列表 → 删除 全流程。"""
+    base, _ = http_server
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    import retriever as retriever_mod
+    try:
+        name = "测试文档.md"
+        content = "Pray 上传测试：成都的火锅很出名。"
+        b64 = base64.b64encode(content.encode("utf-8")).decode()
+        data = urllib.parse.urlencode({"name": name, "content": b64}).encode()
+        req = urllib.request.Request(
+            base + "/api/upload", data=data, method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            up = json.loads(r.read().decode("utf-8"))
+        assert up.get("ok") is True
+        assert up["name"] == "测试文档.md"
+
+        # 列表包含该文件
+        with urllib.request.urlopen(base + "/api/uploads", timeout=10) as r:
+            lst = json.loads(r.read().decode("utf-8"))
+        names = [u["name"] for u in lst["uploads"]]
+        assert "测试文档.md" in names
+
+        # 内存索引包含该上传文档
+        assert any(u["name"] == "测试文档.md" for u in retriever_mod.list_uploaded_files())
+
+        # 删除
+        req2 = urllib.request.Request(
+            base + "/api/uploads/" + urllib.parse.quote(name), method="DELETE",
+        )
+        with urllib.request.urlopen(req2, timeout=10) as r:
+            dl = json.loads(r.read().decode("utf-8"))
+        assert dl.get("ok") is True
+
+        with urllib.request.urlopen(base + "/api/uploads", timeout=10) as r:
+            lst2 = json.loads(r.read().decode("utf-8"))
+        assert "测试文档.md" not in [u["name"] for u in lst2["uploads"]]
+    finally:
+        for u in list(retriever_mod.list_uploaded_files()):
+            retriever_mod.remove_uploaded_file(u["name"])
+
+
+def test_http_upload_rejects_bad_name_and_type(http_server):
+    """真实 HTTP：非法文件名与不支持的类型应被拒绝。"""
+    base, _ = http_server
+    b64 = base64.b64encode(b"hello").decode()
+
+    def _post_upload(name, content):
+        data = urllib.parse.urlencode({"name": name, "content": content}).encode()
+        req = urllib.request.Request(
+            base + "/api/upload", data=data, method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode("utf-8"))
+
+    # 路径逃逸文件名
+    status, resp = _post_upload("../../evil.md", b64)
+    assert status == 400 and resp.get("error"), "路径逃逸文件名应被拒绝"
+
+    # 不支持的扩展名
+    status2, resp2 = _post_upload("evil.exe", b64)
+    assert status2 == 400 and resp2.get("error"), "不支持的类型应被拒绝"
 
 
 # ---------- 来源提取（sources） ----------

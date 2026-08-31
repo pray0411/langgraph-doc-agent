@@ -269,8 +269,14 @@
   .btn-save:hover { background: var(--accent-dark); }
   .input-box { max-width: 820px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; border: 1px solid var(--border); border-radius: 14px; padding: 8px 8px 8px 12px; background: var(--bg-input); transition: border-color .2s, box-shadow .2s; }
   .input-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(16,163,127,.12); }
-  #keyToggle { width: 30px; height: 38px; border: none; background: none; color: var(--text-dim); cursor: pointer; font-size: 16px; flex-shrink: 0; transition: color .15s; }
-  #keyToggle:hover { color: var(--accent); }
+  #uploadBtn { width: 30px; height: 38px; border: none; background: none; color: var(--text-dim); cursor: pointer; font-size: 16px; flex-shrink: 0; transition: color .15s; }
+  #uploadBtn:hover { color: var(--accent); }
+  .upload-bar { max-width: 820px; margin: 0 auto 8px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); }
+  .upload-label { flex-shrink: 0; }
+  .upload-chip { display: inline-flex; align-items: center; gap: 4px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 999px; padding: 3px 8px 3px 10px; font-size: 12px; color: var(--text); }
+  .upload-chip .u-name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .upload-chip .u-del { border: none; background: none; color: var(--text-dim); cursor: pointer; font-size: 12px; padding: 0 2px; }
+  .upload-chip .u-del:hover { color: var(--error-text); }
   #question { flex: 1; border: none; outline: none; font-size: 14.5px; padding: 8px 0; resize: none; max-height: 140px; font-family: inherit; color: var(--text); background: transparent; }
   #askBtn { width: 38px; height: 38px; border: none; border-radius: 10px; background: var(--accent); color: #fff; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; transition: background .15s; flex-shrink: 0; }
   #askBtn:hover { background: var(--accent-dark); }
@@ -374,7 +380,14 @@
         </div>
       </div>
 
+      <div class="upload-bar" id="uploadBar" hidden>
+        <span class="upload-label">📎 已上传文档（问答可直接引用）：</span>
+        <span id="uploadList"></span>
+      </div>
+
       <div class="input-box">
+        <button id="uploadBtn" title="上传文档（.md/.txt/.py 等，供文档问答）">📎</button>
+        <input type="file" id="fileInput" accept=".md,.txt,.py,.rst,.html" multiple hidden>
         <button id="keyToggle" title="设置">⚙</button>
         <textarea id="question" rows="1" placeholder="发送消息…（Enter 发送，Shift+Enter 换行）"></textarea>
         <button id="askBtn" title="发送">➤</button>
@@ -1491,6 +1504,87 @@ function openTerminal(code, codeId) {
 
 loadMode();
 loadSessions();
+
+/* ===== 文档上传 ===== */
+const uploadBtn = document.getElementById('uploadBtn');
+const fileInput = document.getElementById('fileInput');
+const uploadBar = document.getElementById('uploadBar');
+const uploadListEl = document.getElementById('uploadList');
+
+uploadBtn.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  const files = Array.from(fileInput.files || []);
+  fileInput.value = '';
+  uploadFiles(files);
+});
+
+async function uploadFiles(files) {
+  for (const file of files) {
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    if (!['md', 'txt', 'py', 'rst', 'html'].includes(ext)) {
+      toast('不支持类型：' + file.name + '（仅 .md/.txt/.py/.rst/.html）');
+      continue;
+    }
+    if (file.size > 5 * 1024 * 1024) { toast('文件过大：' + file.name + '（上限 5MB）'); continue; }
+    try {
+      const b64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const resp = await fetch('/api/upload', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
+        body: 'name=' + encodeURIComponent(file.name) + '&content=' + encodeURIComponent(b64),
+      });
+      const data = await resp.json();
+      if (handleAuthError(data)) return;
+      if (data.error) { toast(data.error); continue; }
+      toast('✅ ' + (data.message || ('已上传 ' + file.name)));
+      loadUploads();
+    } catch (err) {
+      toast('上传失败: ' + err.message);
+    }
+  }
+}
+
+async function loadUploads() {
+  try {
+    const resp = await fetch('/api/uploads', { headers: authHeaders({}) });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (!data.uploads || !data.uploads.length) {
+      uploadBar.hidden = true;
+      uploadListEl.innerHTML = '';
+      return;
+    }
+    uploadBar.hidden = false;
+    uploadListEl.innerHTML = data.uploads.map(u =>
+      '<span class="upload-chip"><span class="u-name" title="' + esc(u.name) + '">'
+      + esc(u.name) + '</span>'
+      + '<button class="u-del" title="删除" data-u="' + esc(u.name) + '">✕</button></span>'
+    ).join('');
+  } catch (err) { /* 列表加载失败静默 */ }
+}
+
+uploadListEl.addEventListener('click', async (ev) => {
+  const del = ev.target.closest('.u-del');
+  if (!del) return;
+  const name = del.dataset.u;
+  try {
+    const resp = await fetch('/api/uploads/' + encodeURIComponent(name), {
+      method: 'DELETE',
+      headers: authHeaders({}),
+    });
+    const data = await resp.json();
+    if (data.error) { toast(data.error); return; }
+    toast('已删除 ' + name);
+    loadUploads();
+  } catch (err) { toast('删除失败: ' + err.message); }
+});
+
+loadUploads();
 </script>
 </body>
 </html>

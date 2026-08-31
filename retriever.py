@@ -268,6 +268,80 @@ def load_index() -> dict:
         return build_index(force=True)
 
 
+# ---------- 上传文档（内存增量索引） ----------
+
+# 用户通过网页上传的文档单独建内存 BM25 索引（不落盘到 index.json），
+# 与全局文档索引在 search() 中按同量纲 RRF 分合并排序。
+# 文档集小且更新频繁，纯 BM25 足够且确定；语义向量通道保持全局索引专属。
+_uploaded: list[dict] = []           # [{source, chunk, tokens}]
+_uploaded_lock = threading.Lock()
+_uploaded_version = 0                # 变更计数：纳入检索缓存 key，上传/删除后自动失效
+
+
+def _uploaded_bm25_meta() -> tuple[int, Counter, float]:
+    """上传文档集合的 BM25 全局统计 (n_docs, df, avg_dl)。"""
+    n = len(_uploaded)
+    df: Counter = Counter()
+    total = 0
+    for r in _uploaded:
+        df.update(set(r["tokens"]))
+        total += len(r["tokens"])
+    return n, df, (total / n if n else 0.0)
+
+
+def add_uploaded_file(name: str, content: str) -> int:
+    """把上传文档加入内存索引（同名替换），返回切分出的片段数。"""
+    global _uploaded_version
+    source = f"uploads/{name}"
+    chunks = split_text(content)
+    with _uploaded_lock:
+        _uploaded[:] = [r for r in _uploaded if r["source"] != source]
+        for c in chunks:
+            _uploaded.append({"source": source, "chunk": c, "tokens": _tokenize(c)})
+        _uploaded_version += 1
+    return len(chunks)
+
+
+def remove_uploaded_file(name: str) -> bool:
+    """从内存索引移除上传文档，返回是否命中。"""
+    global _uploaded_version
+    source = f"uploads/{name}"
+    with _uploaded_lock:
+        before = len(_uploaded)
+        _uploaded[:] = [r for r in _uploaded if r["source"] != source]
+        if len(_uploaded) != before:
+            _uploaded_version += 1
+            return True
+    return False
+
+
+def list_uploaded_files() -> list[dict]:
+    """列出已索引的上传文档（名称 + 片段数）。"""
+    counts: Counter = Counter(r["source"] for r in _uploaded)
+    return [
+        {"name": src.split("/", 1)[1], "chunks": n} for src, n in sorted(counts.items())
+    ]
+
+
+def _search_uploaded(q_tokens: list[str], top_k: int, min_score: float) -> list[dict]:
+    """上传文档纯 BM25 检索，返回与全局通道同量纲的 RRF 融合分。"""
+    if not _uploaded or not q_tokens:
+        return []
+    n_docs, df, avg_dl = _uploaded_bm25_meta()
+    scores = [_bm25_score(q_tokens, r["tokens"], n_docs, df, avg_dl) for r in _uploaded]
+    if not any(s > 0 for s in scores):
+        return []
+    order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+    fused = []
+    for rank, idx in enumerate(order):
+        if scores[idx] <= 0:
+            continue
+        score = 1.0 / (RRF_K + rank)
+        if score > min_score:
+            fused.append({"score": round(score, 6), "source": _uploaded[idx]["source"], "chunk": _uploaded[idx]["chunk"]})
+    return fused[:top_k]
+
+
 # ---------- 检索 ----------
 
 # 最低分数阈值：混合检索融合分；无任何通道命中的片段不参与融合
@@ -288,29 +362,29 @@ def _cosine(vec_a: list[float], vec_b: list[float]) -> float:
 
 
 # 检索结果内存缓存：同一查询在索引未变时直接复用（小文档集场景避免重复全量计算）。
-# 索引文件 mtime 变化（重建/新增文档）时自动失效。
+# 索引文件 mtime 变化（重建/新增文档）或上传文档变化（_uploaded_version）时自动失效。
 _search_cache: dict[tuple, list[dict]] = {}
 _SEARCH_CACHE_MAX = 128
 
 
-def _cache_key(query: str, top_k: int, min_score: float, index_mtime: float) -> tuple:
-    return (query, top_k, min_score, index_mtime)
+def _cache_key(query: str, top_k: int, min_score: float, index_mtime: float, uploaded_version: int) -> tuple:
+    return (query, top_k, min_score, index_mtime, uploaded_version)
 
 
 def search(query: str, top_k: int = 3, min_score: float = MIN_SCORE) -> list[dict]:
-    """混合检索：BM25（jieba 分词）+ 语义向量（sentence-transformers）RRF 融合。
+    """混合检索：全局文档（BM25 + 语义 RRF）+ 上传文档（BM25）合并。
 
-    - 两条通道各自对全部片段打分并排名
-    - 语义通道可用时：任一通道命中的片段参与 RRF 融合（k=60）
-    - 语义通道不可用（索引无向量 / encoder 失败）：回退纯 BM25
+    - 全局通道：BM25（jieba 分词）+ 语义向量（sentence-transformers）RRF 融合
+    - 上传通道：用户上传文档的纯 BM25（同量纲 RRF 分，与全局公平竞争）
+    - 语义通道不可用（索引无向量 / encoder 失败）：全局回退纯 BM25
     - 返回按融合分数降序的 top_k 个
-    - 结果按 (query, 索引 mtime) 内存缓存，索引重建后自动失效
+    - 结果按 (query, 索引 mtime, 上传版本) 内存缓存，索引/上传变化自动失效
     """
     try:
         index_mtime = INDEX_FILE.stat().st_mtime if INDEX_FILE.exists() else 0.0
     except OSError:
         index_mtime = 0.0
-    key = _cache_key(query, top_k, min_score, index_mtime)
+    key = _cache_key(query, top_k, min_score, index_mtime, _uploaded_version)
     if key in _search_cache:
         return _search_cache[key]
 
@@ -364,7 +438,18 @@ def search(query: str, top_k: int = 3, min_score: float = MIN_SCORE) -> list[dic
             fused.append({"score": round(score, 6), "source": r["source"], "chunk": r["chunk"]})
 
     fused.sort(key=lambda x: x["score"], reverse=True)
-    result = fused[:top_k]
+    global_result = fused[:top_k]
+
+    # 合并上传文档通道（用户上传的文档优先参与排序，量纲一致）
+    uploaded_result = _search_uploaded(q_tokens, top_k, min_score)
+    if uploaded_result:
+        merged = {r["source"]: r for r in global_result}
+        for r in uploaded_result:
+            if r["source"] not in merged or r["score"] > merged[r["source"]]["score"]:
+                merged[r["source"]] = r
+        result = sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:top_k]
+    else:
+        result = global_result
 
     # 写缓存（简单 FIFO 上限）
     if len(_search_cache) >= _SEARCH_CACHE_MAX:
