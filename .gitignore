@@ -13,6 +13,7 @@ venv/
 index/
 data/
 models/
+generated/
 *.log
 
 # 临时凭据文件（禁止提交）

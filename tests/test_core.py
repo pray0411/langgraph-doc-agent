@@ -924,3 +924,31 @@ def test_get_session_messages_generates_sources(monkeypatch, tmp_path):
     import json as _json
     ref = _json.loads(assistant["reflection"])
     assert ref["使用文档检索"] is True
+
+
+# ---------- write_file 工具（代码落盘） ----------
+
+def test_write_file_creates_file(monkeypatch, tmp_path):
+    """write_file 应把内容写入 WRITE_DIR 内并自动建目录。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    from tools import write_file
+
+    r = write_file.invoke({"file_path": "sub/game.py", "content": "print('hi')\n"})
+    assert "已写入" in r
+    assert (tmp_path / "sub" / "game.py").exists()
+    assert (tmp_path / "sub" / "game.py").read_text(encoding="utf-8") == "print('hi')\n"
+
+
+def test_write_file_rejects_path_escape(monkeypatch, tmp_path):
+    """write_file 应拒绝 ../ 逃逸与绝对路径。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    from tools import write_file
+
+    r1 = write_file.invoke({"file_path": "../../etc/passwd", "content": "x"})
+    assert "拒绝" in r1
+    r2 = write_file.invoke({"file_path": "C:/Windows/system32/x.txt", "content": "x"})
+    assert "拒绝" in r2
+    # 目录内不应产生文件
+    assert list(tmp_path.iterdir()) == []

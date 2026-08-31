@@ -14,6 +14,10 @@ BASE_DIR = Path(__file__).resolve().parent
 DOCS_DIR = Path(os.getenv("DOCS_DIR", BASE_DIR / "docs"))
 INDEX_DIR = Path(os.getenv("INDEX_DIR", BASE_DIR / "index"))
 
+# Agent 可写文件的根目录（write_file 工具的安全边界）：
+# 只允许在此目录内创建/修改文件，路径逃逸（../）会被拒绝
+WRITE_DIR = Path(os.getenv("WRITE_DIR", str(BASE_DIR / "generated")))
+
 # 多轮会话记忆存储（SQLite checkpointer）
 MEMORY_DB = os.getenv("MEMORY_DB", str(BASE_DIR / "data" / "memory.sqlite"))
 

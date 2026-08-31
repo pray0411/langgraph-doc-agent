@@ -11,7 +11,11 @@
 | 📄 文档问答（RAG） | `search_documents` | "项目的核心架构是什么？" |
 | 🌤️ 实时天气 | `get_weather` | "今天北京的天气怎么样？" |
 | 🔍 联网搜索 | `web_search` | "最近有什么 AI 新闻？" |
+| 💾 代码落盘 | `write_file` | "写一个猜数字游戏保存到 guess_game.py" |
 | 💬 普通对话 | （直答） | "你好，你是谁？" |
+
+> **代码落盘**：让 AI 直接写文件到 `generated/` 目录（`WRITE_DIR` 可配置）。
+> 安全边界：只允许写入该目录内，`../` 逃逸与绝对路径会被拒绝，父目录自动创建。
 
 ## 快速开始
 
@@ -142,7 +146,7 @@ python -X utf8 main.py web
 ```
 langgraph-doc-agent/
 ├── graph.py         # ★ 核心：create_react_agent 通用 Agent + 反思逻辑 + checkpointer 记忆
-├── tools.py         # 工具集：search_documents / web_search / get_weather
+├── tools.py         # 工具集：search_documents / web_search / get_weather / write_file
 ├── retriever.py     # jieba+BM25 + embedding 语义的 RRF 混合检索
 ├── server.py        # 网页服务（并发安全、请求超时、API Token 鉴权）
 ├── main.py          # 命令行入口

@@ -26,7 +26,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.prebuilt import create_react_agent
 
 from config import LLM_MODEL, LLM_PROVIDER, MEMORY_DB
-from tools import get_weather, search_documents, web_search
+from tools import get_weather, search_documents, web_search, write_file
 
 
 class AgentResult(TypedDict, total=False):
@@ -157,7 +157,7 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
 
     agent = create_react_agent(
         model=model,
-        tools=[search_documents, web_search, get_weather],
+        tools=[search_documents, web_search, get_weather, write_file],
         checkpointer=memory or get_memory(),
     )
     # 挂 usage 回调供 _usage_of 读取（随 agent 缓存一起保存）

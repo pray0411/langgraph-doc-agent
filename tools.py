@@ -3,11 +3,41 @@
 - search_documents: 检索本地文档索引（RAG）
 - web_search: 联网搜索实时信息（天气/新闻/事实）
 - get_weather: 查询指定城市实时天气
+- write_file: 把内容写入本地文件（限制在 WRITE_DIR 目录内）
 """
+from pathlib import Path
+
 from langchain_core.tools import tool
 
 from config import BOCHA_API_KEY, TOP_K
 from retriever import search as _search_docs
+
+
+@tool
+def write_file(file_path: str, content: str) -> str:
+    """把内容写入本地文件（代码落盘）。
+
+    当用户要求"把代码/内容保存为文件"、"写入 xxx.py"、"生成一个脚本文件"时调用。
+    只允许写入 {write_dir} 目录内（相对或绝对路径均可，但不得逃逸出该目录，
+    如 ../ 会被拒绝）；父目录不存在时自动创建。
+
+    Args:
+        file_path: 目标文件路径（如 "game.py" 或 "sub/game.py"）
+        content: 要写入的文件内容（完整文本）
+    """
+    from config import WRITE_DIR
+
+    write_root = Path(WRITE_DIR).resolve()
+    target = (write_root / file_path).resolve()
+    # 安全校验：目标路径必须位于 WRITE_DIR 内（防 ../ 逃逸）
+    if not target.is_relative_to(write_root):
+        return f"拒绝写入：路径 {file_path} 超出允许目录 {write_root}"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return f"已写入 {target.relative_to(write_root)}（{len(content)} 字符，{len(content.splitlines())} 行）"
+    except OSError as exc:
+        return f"写入失败: {exc}"
 
 
 def _bocha_search(query: str, max_results: int = 5) -> list[dict]:
