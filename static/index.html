@@ -1164,13 +1164,15 @@ document.addEventListener('click', (e) => {
     '<div class="run-modal-body">' +
       '<div class="run-modal-head"><span>▶ 运行结果</span>' +
         '<button class="run-modal-close" title="关闭">✕</button></div>' +
-      '<iframe sandbox="allow-scripts" srcdoc=""></iframe>' +
+      // allow-modals：允许游戏使用 alert/prompt/confirm 弹窗
+      '<iframe sandbox="allow-scripts allow-modals" srcdoc=""></iframe>' +
     '</div>';
   document.body.appendChild(modal);
 
-  // srcdoc 转义（单引号/双引号/尖括号安全插入）
+  // 直接通过 DOM property 赋值 srcdoc——浏览器自动处理特殊字符，
+  // 切勿手动转义 & / "（<script> 内是 raw text，实体不会被还原，会破坏 JS）
   const iframe = modal.querySelector('iframe');
-  iframe.srcdoc = code.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+  iframe.srcdoc = code;
 
   modal.querySelector('.run-modal-close').addEventListener('click', () => modal.remove());
   modal.addEventListener('click', (ev) => { if (ev.target === modal) modal.remove(); });
