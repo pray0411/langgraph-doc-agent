@@ -1054,8 +1054,14 @@ async function ask() {
           if (confirmMatch) {
             pendingConfirm = { command: confirmMatch[1] };
           }
-          // 工具失败信息透传：结果含失败/错误字样时显示警告
-          if (r && /失败|错误|无法|没有搜索|查无|超时|error|fail/i.test(r)) {
+          // 工具异常检测：run_command 的所有返回（成功/失败/拦截/超时/待确认）
+          // 都是正常执行结果，AI 会在回答中转述，不显示红条。
+          // 其他工具（检索/搜索/天气）真出错时才警告。
+          const isRunCmdResult = /^[❌✅] (执行成功|执行失败)（exit \d+）/.test(r)
+            || /^NEED_CONFIRM /.test(r)
+            || /^⛔ /.test(r)
+            || /^⏱ /.test(r);
+          if (!isRunCmdResult && r && /失败|错误|无法|没有搜索|查无|超时|error|fail/i.test(r)) {
             toolWarns.push(r.slice(0, 80));
             const warn = document.createElement('div');
             warn.className = 'tool-warn';
