@@ -460,8 +460,14 @@ applyTheme();
 function renderInline(text) {
   // 必须转义后处理，顺序：代码 > 链接 > 粗体/斜体 > 其他
   let s = esc(text);
-  // 行内代码
-  s = s.replace(/`([^`]+)`/g, (m, c) => '<code>' + c + '</code>');
+  // 行内代码：如果是文件名（xxx.html/.py/.js 等）→ 渲染成可点击链接，
+  // 点击用浏览器/默认程序打开（替代"双击"文字提示）
+  s = s.replace(/`([^`]+)`/g, (m, c) => {
+    if (/^[\w\-]+\.(?:html?|py|js|json|md|txt|sh|css|sql|yml|yaml)$/i.test(c)) {
+      return '<a class="file-link" href="#" data-file="' + c + '" title="点击打开 ' + c + '">' + c + '</a>';
+    }
+    return '<code>' + c + '</code>';
+  });
   // 链接 [text](url)
   s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (m, t, u) => '<a href="' + u + '" target="_blank" rel="noopener">' + t + '</a>');
   // 粗体 **text**
@@ -1288,6 +1294,16 @@ document.getElementById('cfgSave').addEventListener('click', async () => {
   } catch (err) {
     cfgMsg.textContent = '请求失败: ' + err.message;
   }
+});
+
+// 文件名可点击链接（事件委托，覆盖所有动态渲染的 file-link）
+document.addEventListener('click', (e) => {
+  const link = e.target.closest('.file-link');
+  if (!link) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const filename = link.getAttribute('data-file') || link.textContent;
+  openGeneratedFile(filename);
 });
 
 // 代码块复制按钮（事件委托）
