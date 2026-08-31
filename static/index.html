@@ -146,6 +146,9 @@
   .md pre code { background: none; padding: 0; font-size: 13px; line-height: 1.6; display: block; }
   .md a { color: var(--accent); text-decoration: none; }
   .md a:hover { text-decoration: underline; }
+  /* 文件名可点击链接 */
+  .file-link { color: var(--accent); text-decoration: underline dotted; cursor: pointer; }
+  .file-link:hover { text-decoration: underline; }
   .md table { border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 13.5px; }
   .md th, .md td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
   .md th { background: var(--bg-hover); font-weight: 600; }
@@ -612,7 +615,6 @@ function renderMarkdown(md) {
 
 /* ===== 消息渲染 ===== */
 function formatTime(ts) {
-  // ts 可为 Date 或 ISO 字符串；返回 "MM-DD HH:MM"（跨天）或 "HH:MM"（当天）
   const d = ts ? new Date(ts) : new Date();
   if (isNaN(d.getTime())) d = new Date();
   const now = new Date();
@@ -620,6 +622,55 @@ function formatTime(ts) {
   const hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
   if (d.toDateString() === now.toDateString()) return hm;
   return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + hm;
+}
+
+/* 渲染回答：Markdown + 把文件名（minesweeper.html 等）转成可点击链接 */
+function renderAnswer(bodyEl, md) {
+  let html = renderMarkdown(md);
+  // 文件名链接化：只处理 <p>/<li>/<td> 等文本节点里的裸文件名，
+  // 跳过 <pre>/<code>/<a> 内（避免破坏代码块和已有链接）
+  const walker = document.createElement('div');
+  walker.innerHTML = html;
+  walker.querySelectorAll('p, li, td, th, blockquote, h1, h2, h3, h4').forEach(el => {
+    [...el.childNodes].forEach(node => {
+      if (node.nodeType === 3) {  // 文本节点
+        const re = /([\w\-]+\.(?:html?|py|js|json|md|txt|sh|css|sql|yml|yaml))/g;
+        const frag = document.createDocumentFragment();
+        let last = 0, m;
+        const text = node.textContent;
+        while ((m = re.exec(text)) !== null) {
+          if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+          const a = document.createElement('a');
+          a.className = 'file-link';
+          a.textContent = m[1];
+          a.title = '点击打开 ' + m[1];
+          a.href = '#';
+          a.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openGeneratedFile(m[1]);
+          });
+          frag.appendChild(a);
+          last = m.index + m[0].length;
+        }
+        if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+        if (frag.childNodes.length) node.parentNode.replaceChild(frag, node);
+      }
+    });
+  });
+  bodyEl.innerHTML = '';
+  bodyEl.appendChild(walker);
+}
+
+/* 点击文件名：调后端打开 generated/ 内的文件（浏览器/默认程序） */
+function openGeneratedFile(filename) {
+  fetch('/api/open?file=' + encodeURIComponent(filename), { headers: authHeaders({}) })
+    .then(resp => resp.json())
+    .then(data => {
+      if (data.ok) toast('已打开 ' + filename);
+      else toast(data.error || '打开失败');
+    })
+    .catch(() => toast('打开失败'));
 }
 
 function addMessage(role, content, opts = {}) {
@@ -1035,7 +1086,7 @@ async function ask() {
         renderTimer = null;
         if (renderDirty) {
           renderDirty = false;
-          answerBody.innerHTML = renderMarkdown(answer);
+          renderAnswer(answerBody, answer);
           scrollBottom();
         }
       }, 50);  // 每 50ms 最多重渲染一次
@@ -1044,7 +1095,7 @@ async function ask() {
       if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
       if (renderDirty || answer) {
         renderDirty = false;
-        answerBody.innerHTML = renderMarkdown(answer);
+        renderAnswer(answerBody, answer);
         scrollBottom();
       }
     }

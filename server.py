@@ -141,6 +141,10 @@ class Handler(BaseHTTPRequestHandler):
             if not self._auth_required():
                 return
             self._handle_run_output()
+        elif self.path.startswith("/api/open"):
+            if not self._auth_required():
+                return
+            self._handle_open_file()
         else:
             self.send_error(404)
 
@@ -465,6 +469,20 @@ class Handler(BaseHTTPRequestHandler):
             return
         approvals.approve(command)
         self._json({"ok": True, "command": command})
+
+    def _handle_open_file(self):
+        """前端点击文件名时用系统默认程序打开 WRITE_DIR 内文件。"""
+        from urllib.parse import urlparse, parse_qs as _pq
+
+        qs = _pq(urlparse(self.path).query)
+        filename = (qs.get("file") or [""])[0].strip()
+        if not filename:
+            self._json({"error": "缺少 file 参数"}, 400)
+            return
+        from tools import open_in_browser
+
+        result = open_in_browser.invoke({"file_path": filename})
+        self._json({"ok": True, "message": result})
 
     def _json(self, obj, code=200):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
