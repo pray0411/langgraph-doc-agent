@@ -996,3 +996,43 @@ def test_run_command_blocks_destructive(monkeypatch, tmp_path):
     for cmd in ("rm -rf /", "format C:", "shutdown /s"):
         r = run_command.invoke({"command": cmd, "confirmed": True})
         assert "拦截" in r, f"应拦截: {cmd}"
+
+
+def test_run_command_interactive_with_input(monkeypatch, tmp_path):
+    """交互式程序应通过 input_text 提供标准输入。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    from tools import run_command, write_file
+
+    write_file.invoke({"file_path": "calc.py", "content": (
+        "while True:\n"
+        "    line = input('>> ').strip()\n"
+        "    if line == 'q':\n"
+        "        break\n"
+        "    print(f'= {eval(line)}')\n"
+    )})
+
+    r = run_command.invoke({
+        "command": sys.executable + " calc.py",
+        "input_text": "3+5\nq\n",
+        "confirmed": False,
+    })
+    assert "执行成功" in r
+    assert "= 8" in r
+
+
+def test_run_command_no_input_fails_fast(monkeypatch, tmp_path):
+    """交互式程序无输入时应快速失败（stdin 关闭 → EOFError），不卡超时。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    from tools import run_command, write_file
+
+    write_file.invoke({"file_path": "calc2.py", "content": "print(input())\n"})
+
+    r = run_command.invoke({
+        "command": sys.executable + " calc2.py",
+        "input_text": "",
+        "confirmed": False,
+    })
+    # 应快速失败（EOFError），而非 30 秒超时
+    assert "执行失败" in r or "EOFError" in r

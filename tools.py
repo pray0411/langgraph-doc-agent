@@ -199,12 +199,17 @@ _MAX_OUTPUT = 2000  # 字符
 
 
 @tool
-def run_command(command: str, confirmed: bool = False) -> str:
+def run_command(command: str, input_text: str = "", confirmed: bool = False) -> str:
     """执行命令行命令并返回输出（如运行 Python 脚本、查看目录、测试代码）。
 
     当需要运行/验证刚写好的代码、查看文件列表、执行脚本、安装依赖时调用——
     例如写完 guess_game.py 后运行 "python guess_game.py" 验证。
     只在 {cwd} 目录内执行。
+
+    【交互式程序】如果程序用 input() 等待用户输入（如计算器、游戏、CLI），
+    必须通过 input_text 提供输入（每行一个输入，用换行分隔），
+    否则程序会卡在等待输入导致超时。例如运行计算器：
+      command="python calculator.py", input_text="3+5\\n10-4\\nq\\n"
 
     安全机制：
     - 破坏性命令（rm -rf /、format、shutdown 等）直接拒绝
@@ -214,6 +219,8 @@ def run_command(command: str, confirmed: bool = False) -> str:
 
     Args:
         command: 要执行的命令字符串（如 "python guess_game.py"）
+        input_text: 可选，通过标准输入喂给程序的文本（交互式程序需要，
+            每行一个输入，换行分隔）
         confirmed: 高危命令的用户确认标记（首次调用传 False）
     """
     import re
@@ -236,15 +243,17 @@ def run_command(command: str, confirmed: bool = False) -> str:
             f"[{command}] 是否执行？确认后请用 confirmed=True 重新调用本工具。"
         )
 
-    # 3. 执行（沙箱目录 + 超时 + 截断）
+    # 3. 执行（沙箱目录 + 超时 + 截断 + 标准输入）
     try:
         proc = subprocess.Popen(
             command, cwd=cwd, shell=True,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
         )
         try:
-            stdout, stderr = proc.communicate(timeout=_COMMAND_TIMEOUT)
+            # 通过 stdin 喂输入（交互式程序必需）；无输入时传空串立即关闭 stdin
+            stdout, stderr = proc.communicate(input=input_text, timeout=_COMMAND_TIMEOUT)
         except subprocess.TimeoutExpired:
             # 超时：强杀进程树（Windows 用 taskkill /T，Linux 用 kill 组），
             # 防止 cmd 派生的子进程残留
@@ -259,7 +268,10 @@ def run_command(command: str, confirmed: bool = False) -> str:
                     proc.kill()
             except Exception:  # noqa: BLE001
                 pass
-            return f"⏱ 命令超时（>{_COMMAND_TIMEOUT}s），已终止：{command}"
+            return (
+                f"⏱ 命令超时（>{_COMMAND_TIMEOUT}s），已终止：{command}。"
+                "若程序在等待 input() 输入，请通过 input_text 参数提供输入（每行一个，换行分隔）后重试。"
+            )
         result = proc
     except Exception as exc:  # noqa: BLE001
         return f"执行失败: {exc}"
