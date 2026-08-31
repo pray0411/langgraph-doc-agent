@@ -702,6 +702,8 @@ function removeTyping() {
 }
 
 function addToolStatus(name) {
+  // 先移除旧状态条（连续调用多个工具时不叠加）
+  removeToolStatus();
   const wrap = document.createElement('div');
   wrap.className = 'tool-status';
   wrap.id = 'toolStatus';
@@ -1046,7 +1048,8 @@ async function ask() {
           // 尾部指示器切换为"正在调用工具"
           if (thinkingText) thinkingText.textContent = '正在调用 ' + ev.name + ' …';
         } else if (ev.type === 'tool_done') {
-          // 工具完成，恢复"正在思考"（模型继续推理下一段回答）
+          // 工具完成：移除"正在调用"状态条，恢复"正在思考"
+          removeToolStatus();
           if (thinkingText) thinkingText.textContent = '正在思考…';
           // 高危命令待确认：工具返回 NEED_CONFIRM，收集命令供结束后弹窗
           const r = (ev.result || '').trim();
