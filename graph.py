@@ -30,9 +30,13 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from config import LLM_MODEL, LLM_PROVIDER, MEMORY_DB
 from prompts import SYSTEM_PROMPT
 from tools import (
+    edit_file,
     fetch_url,
+    get_current_time,
     get_weather,
+    list_files,
     open_in_browser,
+    read_file,
     run_command,
     search_documents,
     web_search,
@@ -208,7 +212,8 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
         model=model,
         tools=[
             search_documents, web_search, get_weather,
-            write_file, run_command, open_in_browser, fetch_url,
+            write_file, read_file, list_files, edit_file,
+            run_command, open_in_browser, fetch_url, get_current_time,
         ],
         checkpointer=memory or get_memory(),
         # 系统提示：行为准则集中管理在 prompts.py（与工具 docstring 协同）

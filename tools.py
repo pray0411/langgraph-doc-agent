@@ -49,6 +49,202 @@ def write_file(file_path: str, content: str) -> str:
         return f"写入失败: {exc}"
 
 
+def _safe_target(file_path: str, *, must_exist: bool) -> tuple[Path, Path] | str:
+    """校验 file_path 位于 WRITE_DIR 内，返回 (write_root, target)；不合法返回错误串。"""
+    from config import WRITE_DIR
+
+    write_root = Path(WRITE_DIR).resolve()
+    target = (write_root / file_path).resolve()
+    if not target.is_relative_to(write_root):
+        return f"拒绝访问：路径 {file_path} 超出允许目录 {write_root}"
+    if must_exist and not target.exists():
+        return f"文件不存在: {file_path}"
+    return write_root, target
+
+
+@tool
+def read_file(file_path: str, start_line: int = 1, max_lines: int = 200) -> str:
+    """读取本地文件内容（带行号，供修改/分析代码用）。
+
+    当你需要查看已落盘文件的内容（如用户让你修改 guess_game.py 前先看它现在
+    写了什么、排查代码问题）时调用。**写→跑→修闭环的关键一步**：先读再改，
+    不要凭记忆盲改。
+
+    安全边界：只允许读取 WRITE_DIR 目录内的文件（相对或绝对路径均可，不得
+    逃逸出该目录）。文件过大时分段读取：默认从第 1 行开始最多读 200 行，
+    超长文件会提示剩余行数，用 start_line 继续读下一段。
+
+    Args:
+        file_path: 文件路径（如 "guess_game.py" 或 "scripts/calc.py"）
+        start_line: 起始行号（从 1 开始，默认 1）
+        max_lines: 最多读取多少行（默认 200，最大 1000）
+    """
+    import os
+
+    checked = _safe_target(file_path, must_exist=True)
+    if isinstance(checked, str):
+        return checked
+    write_root, target = checked
+
+    # 二进制检测：含 null 字节视为二进制，拒绝按文本读
+    try:
+        raw = target.read_bytes()
+    except OSError as exc:
+        return f"读取失败: {exc}"
+    if b"\x00" in raw[:4096]:
+        return f"{file_path} 是二进制文件，无法按文本读取（大小 {len(raw)} 字节）"
+
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    total = len(lines)
+    start_line = max(1, int(start_line))
+    max_lines = min(max(1, int(max_lines)), 1000)
+    end_line = min(start_line + max_lines - 1, total)
+    if start_line > total:
+        return f"{file_path} 共 {total} 行，起始行 {start_line} 超出范围"
+
+    body = "\n".join(f"{i:4d}| {lines[i-1]}" for i in range(start_line, end_line + 1))
+    head = f"{file_path}（共 {total} 行，显示 {start_line}-{end_line} 行，{os.path.getsize(target)} 字节）"
+    tail = f"\n… 还有 {total - end_line} 行未显示，可用 start_line={end_line + 1} 继续读" if end_line < total else ""
+    return head + "\n" + body + tail
+
+
+@tool
+def list_files(path: str = "") -> str:
+    """列出本地目录下的文件（路径、大小、修改时间）。
+
+    当用户问"项目里有哪些文件"、或你想知道 WRITE_DIR 里已生成/已上传了什么、
+    或需要确认要操作的文件是否存在时调用。递归列出子目录，自动跳过
+    .git/node_modules/__pycache__ 等缓存目录。
+
+    Args:
+        path: WRITE_DIR 内的相对目录（空字符串 = 根目录，如 "scripts"）
+    """
+    import os
+    import time as _time
+
+    checked = _safe_target(path, must_exist=False)
+    if isinstance(checked, str):
+        return checked
+    write_root, target = checked
+    if not target.exists():
+        return f"目录不存在: {path or '.'}"
+    if not target.is_dir():
+        return f"{path or '.'} 不是目录"
+
+    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", ".pytest_cache"}
+    entries: list[str] = []
+    limit = 200  # 条目上限，防刷屏
+
+    def _walk(d: Path, depth: int):
+        if len(entries) >= limit or depth > 4:
+            return
+        try:
+            items = sorted(d.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+        except OSError:
+            return
+        for p in items:
+            if len(entries) >= limit:
+                return
+            rel = p.relative_to(write_root)
+            if p.is_dir():
+                if p.name in skip_dirs:
+                    continue
+                entries.append(f"[目录] {rel}/")
+                _walk(p, depth + 1)
+            else:
+                try:
+                    size = p.stat().st_size
+                    mtime = _time.strftime("%m-%d %H:%M", _time.localtime(p.stat().st_mtime))
+                except OSError:
+                    size, mtime = 0, "?"
+                entries.append(f"{mtime} {size:>9,}  {rel}")
+
+    _walk(target, 0)
+    if not entries:
+        return f"{path or '.'} 目录为空"
+    head = f"{path or '.'}（{len(entries)} 个条目" + ("，仅显示前 200 个" if len(entries) >= limit else "") + "）："
+    return head + "\n" + "\n".join(entries)
+
+
+@tool
+def get_current_time() -> str:
+    """获取当前本地日期与时间。
+
+    当用户问"现在几点/今天几号/星期几"、或需要为回答提供时间上下文
+    （如"最近"、"昨天"）时调用，不要凭记忆猜测时间。
+
+    Returns:
+        形如 "2026-08-31 14:30:05 星期一（UTC+08:00）" 的字符串
+    """
+    import time as _time
+
+    now = _time.localtime()
+    weekdays = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+    return (
+        f"{now.tm_year:04d}-{now.tm_mon:02d}-{now.tm_mday:02d} "
+        f"{now.tm_hour:02d}:{now.tm_min:02d}:{now.tm_sec:02d} "
+        f"{weekdays[now.tm_wday]}（UTC{_time.strftime('%z', now)}）"
+    )
+
+
+@tool
+def edit_file(file_path: str, old_text: str, new_text: str, occurrence: int = 1) -> str:
+    """精确替换文件中的一段内容（修改已有代码/文档）。
+
+    当需要修改已落盘文件的局部内容（改 bug、调参数、换文案）时调用——
+    比整文件重写更省 token 且不易误伤其他部分。**改代码前先用 read_file
+    查看当前内容**，确保 old_text 与文件中的原文逐字符一致（含缩进）。
+
+    安全与规则：
+    - 只允许修改 WRITE_DIR 目录内的文件
+    - old_text 必须在文件中精确出现；默认替换第 1 处，出现多次时用
+      occurrence 指定（超出次数会报错），**绝不批量静默替换**
+    - 替换前会先校验（找不到/超次数则报错），不会写坏文件
+
+    Args:
+        file_path: 文件路径（如 "guess_game.py"）
+        old_text: 要替换的原文片段（必须与文件内容逐字符一致）
+        new_text: 替换后的新内容
+        occurrence: 替换第几处出现（默认 1）
+    """
+    checked = _safe_target(file_path, must_exist=True)
+    if isinstance(checked, str):
+        return checked
+    write_root, target = checked
+
+    try:
+        content = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"读取失败: {exc}"
+
+    count = content.count(old_text)
+    if count == 0:
+        # 常见原因提示：缩进/引号不一致，给出可复制的错误定位
+        return (
+            f"替换失败：在 {file_path} 中未找到该片段（共 {len(content.splitlines())} 行）。"
+            "请先用 read_file 查看文件当前内容，确保 old_text 与原文逐字符一致（含缩进与引号）。"
+        )
+    if occurrence < 1 or occurrence > count:
+        return f"替换失败：片段在文件中出现 {count} 次，occurrence={occurrence} 超出范围（可选 1-{count}）"
+
+    # 定位第 occurrence 处
+    idx = -1
+    for _ in range(occurrence):
+        idx = content.find(old_text, idx + 1)
+    new_content = content[:idx] + new_text + content[idx + len(old_text):]
+    try:
+        target.write_text(new_content, encoding="utf-8")
+    except OSError as exc:
+        return f"写入失败: {exc}"
+    old_lines = old_text.count("\n") + 1
+    new_lines = new_text.count("\n") + 1
+    return (
+        f"已替换 {file_path} 第 {occurrence}/{count} 处（{old_lines} 行 → {new_lines} 行）："
+        f"\n- 原: {old_text[:60]!r}"
+        f"\n+ 新: {new_text[:60]!r}"
+    )
+
+
 def _bocha_search(query: str, max_results: int = 5) -> list[dict]:
     """博查搜索（国内，中文质量高，Agent 专用）。"""
     import json as _json

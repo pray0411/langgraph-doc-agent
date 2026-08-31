@@ -1421,6 +1421,103 @@ def test_open_in_browser_rejects_escape_and_missing(monkeypatch, tmp_path):
     assert "不存在" in r2
 
 
+# ---------- read_file / list_files / edit_file / get_current_time ----------
+
+def test_read_file_with_line_numbers(monkeypatch, tmp_path):
+    """read_file 应带行号读取 WRITE_DIR 内文件。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    (tmp_path / "demo.py").write_text("line1\nline2\nline3\n", encoding="utf-8")
+    from tools import read_file
+
+    r = read_file.invoke({"file_path": "demo.py"})
+    assert "1| line1" in r and "3| line3" in r
+
+
+def test_read_file_paged_and_range(monkeypatch, tmp_path):
+    """read_file 超长文件应提示剩余行数，且 start_line 可续读。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    (tmp_path / "big.py").write_text("\n".join(f"l{i}" for i in range(50)), encoding="utf-8")
+    from tools import read_file
+
+    r1 = read_file.invoke({"file_path": "big.py", "max_lines": 10})
+    assert "还有 40 行未显示" in r1
+    r2 = read_file.invoke({"file_path": "big.py", "start_line": 41, "max_lines": 20})
+    assert "41| l40" in r2
+
+
+def test_read_file_rejects_escape_and_binary(monkeypatch, tmp_path):
+    """read_file 应拒绝路径逃逸、不存在文件与二进制文件。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    (tmp_path / "bin.dat").write_bytes(b"\x00\x01\x02")
+    from tools import read_file
+
+    assert "超出" in read_file.invoke({"file_path": "../../etc/passwd"})
+    assert "不存在" in read_file.invoke({"file_path": "nope.py"})
+    assert "二进制" in read_file.invoke({"file_path": "bin.dat"})
+
+
+def test_list_files_shows_entries(monkeypatch, tmp_path):
+    """list_files 应列出目录内文件与子目录，跳过缓存目录。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    (tmp_path / "a.py").write_text("x", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.md").write_text("y", encoding="utf-8")
+    (tmp_path / "__pycache__").mkdir()
+    from tools import list_files
+
+    r = list_files.invoke({"path": ""})
+    assert "a.py" in r and "sub/" in r and "b.md" in r
+    assert "__pycache__" not in r
+
+
+def test_edit_file_replaces_once(monkeypatch, tmp_path):
+    """edit_file 应精确替换指定处，并保持文件其他部分不变。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    (tmp_path / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    from tools import edit_file
+
+    r = edit_file.invoke({"file_path": "calc.py", "old_text": "return a + b", "new_text": "return a + b + 1"})
+    assert "已替换" in r
+    assert (tmp_path / "calc.py").read_text(encoding="utf-8") == "def add(a, b):\n    return a + b + 1\n"
+
+
+def test_edit_file_fails_when_not_found(monkeypatch, tmp_path):
+    """edit_file 找不到片段时应报错且不写坏文件。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    (tmp_path / "x.py").write_text("alpha\nbeta\n", encoding="utf-8")
+    from tools import edit_file
+
+    r = edit_file.invoke({"file_path": "x.py", "old_text": "gamma", "new_text": "delta"})
+    assert "未找到" in r
+    assert (tmp_path / "x.py").read_text(encoding="utf-8") == "alpha\nbeta\n"  # 未改动
+
+
+def test_edit_file_occurrence_out_of_range(monkeypatch, tmp_path):
+    """edit_file occurrence 超出出现次数应报错，绝不批量静默替换。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    (tmp_path / "y.txt").write_text("a\nb\na\n", encoding="utf-8")
+    from tools import edit_file
+
+    r = edit_file.invoke({"file_path": "y.txt", "old_text": "a", "new_text": "z", "occurrence": 3})
+    assert "出现 2 次" in r
+
+
+def test_get_current_time_format():
+    """get_current_time 应返回含日期、时间、星期的字符串。"""
+    from tools import get_current_time
+
+    r = get_current_time.invoke({})
+    assert len(r) > 15
+    assert "星期" in r and "-" in r and ":" in r
+
+
 # ---------- fetch_url 工具（GitHub 白名单只读抓取） ----------
 
 def test_fetch_url_rejects_non_whitelisted(monkeypatch):
