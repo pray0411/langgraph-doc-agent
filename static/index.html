@@ -477,10 +477,10 @@ function renderCodeBlock(code, lang) {
   const isRunable = isHtml || /^(python|py|javascript|js|bash|shell|sh|node|go|rust|java|c|cpp)$/.test(langLabel);
   let runBtn = '';
   if (isHtml) {
-    runBtn = '<button class="code-run" data-code="' + id + '" data-mode="iframe" title="浏览器中运行">▶ 运行</button>';
+    runBtn = '<button class="code-run" data-code="' + id + '" data-lang="' + esc(langLabel) + '" data-mode="iframe" title="浏览器中运行">▶ 运行</button>';
   } else if (isRunable) {
     // Python 等：交互终端运行（真实输入输出）
-    runBtn = '<button class="code-run" data-code="' + id + '" data-mode="term" title="交互终端中运行">▶ 运行</button>';
+    runBtn = '<button class="code-run" data-code="' + id + '" data-lang="' + esc(langLabel) + '" data-mode="term" title="交互终端中运行">▶ 运行</button>';
   } else if (lang) {
     runBtn = '<span class="code-run-hint" title="该语言暂不支持直接运行">' + esc(lang) + '</span>';
   }
@@ -1238,7 +1238,7 @@ document.addEventListener('click', (e) => {
   const mode = btn.getAttribute('data-mode') || 'iframe';
 
   if (mode === 'term') {
-    openTerminal(code, btn.getAttribute('data-code') || '');
+    openTerminal(code, btn.getAttribute('data-lang') || '');
     return;
   }
 
@@ -1315,25 +1315,41 @@ function openTerminal(code, codeId) {
     return resp.json();
   }
 
-  // 把代码临时落盘（写进 generated/ 的临时文件，供子进程执行）
-  const ext = { 'python': 'py', 'py': 'py', 'javascript': 'js', 'js': 'js', 'bash': 'sh', 'sh': 'sh', 'node': 'js' }[(codeId || '')] || 'py';
-  const tmpName = 'term_' + Date.now().toString(36) + '.' + ext;
+  // 根据语言决定扩展名与执行命令
+  const langKey = (codeId || '').toLowerCase().replace(/^code-/, '');
+  const langExt = { 'python': 'py', 'py': 'py', 'javascript': 'js', 'js': 'js',
+                    'node': 'js', 'bash': 'sh', 'sh': 'sh', 'shell': 'sh',
+                    'go': 'go', 'rust': 'rs', 'java': 'java', 'c': 'c', 'cpp': 'cpp' }[langKey];
+  const tmpName = 'term_' + Date.now().toString(36) + '.' + (langExt || 'py');
+
+  // 判断代码块内容是不是"命令行指令"（如 `python guess_game.py` / `ls -la`），
+  // 而非程序代码——是则直接执行该命令，不写文件
+  const trimmed = code.trim();
+  const isShellCommand = /^(python|py|python3|node|npm|bash|sh|ls|dir|cd|cat|echo|pip|git|dir)\s+/i.test(trimmed)
+    && !trimmed.includes('\n')  // 单行
+    && !/\b(def |class |import |from |print\(|function |const |let )/.test(trimmed);
 
   (async () => {
-    // 1. 把代码写入 generated/ 临时文件（供子进程执行）
-    const fileData = new URLSearchParams({ path: tmpName, content: code }).toString();
-    const wr = await fetch('/api/run/write', {
-      method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
-      body: fileData,
-    });
-    if (!wr.ok) { print('⚠️ 无法写入临时文件'); return; }
+    let cmd;
+    if (isShellCommand) {
+      // 命令行指令：直接执行
+      cmd = trimmed;
+    } else {
+      // 程序代码：写入临时文件再执行
+      const fileData = new URLSearchParams({ path: tmpName, content: code }).toString();
+      const wr = await fetch('/api/run/write', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
+        body: fileData,
+      });
+      if (!wr.ok) { print('⚠️ 无法写入临时文件'); return; }
+      // 执行命令：按语言选择解释器
+      cmd = langKey.includes('js') ? 'node ' + tmpName
+        : (langKey.includes('sh') || langKey.includes('bash')) ? 'bash ' + tmpName
+        : 'python ' + tmpName;
+    }
 
-    // 2. 启动进程
-    const langKey = (codeId || '').toLowerCase();
-    const cmd = langKey.includes('js') ? 'node ' + tmpName
-      : langKey.includes('sh') ? tmpName
-      : 'python ' + tmpName;
+    // 启动进程
     const startResp = await api('/api/run/start', { command: cmd });
     if (startResp.error) { print(startResp.error); return; }
     const sid = startResp.session_id;
