@@ -1518,24 +1518,77 @@ def test_get_current_time_format():
     assert "星期" in r and "-" in r and ":" in r
 
 
-# ---------- fetch_url 工具（GitHub 白名单只读抓取） ----------
+# ---------- fetch_url 工具（GitHub 白名单自动放行 + 其他域名确认） ----------
 
-def test_fetch_url_rejects_non_whitelisted(monkeypatch):
-    """非白名单域名 / 非 http(s) 协议应拒绝，且不发网络请求。"""
+def test_fetch_url_non_github_needs_confirm(monkeypatch):
+    """非 GitHub 域名未批准应返回 NEED_CONFIRM，且不发网络请求。"""
+    import approvals
     import tools as tools_mod
 
-    def _boom(url, timeout=15):
+    approvals.clear()
+
+    def _boom(url, allowed_hosts=None, timeout=15):
         raise AssertionError(f"不应发起网络请求: {url}")
 
     monkeypatch.setattr(tools_mod, "_http_get", _boom)
     from tools import fetch_url
 
-    assert "白名单" in fetch_url.invoke({"url": "http://evil.com/steal"})
-    assert "白名单" in fetch_url.invoke({"url": "https://attacker.io/x"})
+    r = fetch_url.invoke({"url": "http://evil.com/steal"})
+    assert "NEED_CONFIRM" in r
+    r2 = fetch_url.invoke({"url": "https://attacker.io/x"})
+    assert "NEED_CONFIRM" in r2
+    # 子域名/相似域名不得自动放行（精确 hostname 匹配）
+    r3 = fetch_url.invoke({"url": "https://github.com.evil.com/repo"})
+    assert "NEED_CONFIRM" in r3
+    # 非 http(s) 协议直接拒绝
     assert "http" in fetch_url.invoke({"url": "file:///etc/passwd"})
     assert "http" in fetch_url.invoke({"url": "ftp://github.com/x"})
-    # 子域名/相似域名不得放行（精确 hostname 匹配）
-    assert "白名单" in fetch_url.invoke({"url": "https://github.com.evil.com/repo"})
+
+
+def test_fetch_url_non_github_allowed_after_approval(monkeypatch):
+    """非 GitHub 域名批准后应放行并抓取（一次性消费）。"""
+    import approvals
+    import tools as tools_mod
+
+    approvals.clear()
+    url = "https://example.com/page"
+
+    calls: list[str] = []
+
+    def _fake_get(u, allowed_hosts=None, timeout=15):
+        calls.append(u)
+        return u, "<html><body>示例页面内容</body></html>".encode("utf-8")
+
+    monkeypatch.setattr(tools_mod, "_http_get", _fake_get)
+    from tools import fetch_url
+
+    # 未批准 → NEED_CONFIRM
+    r1 = fetch_url.invoke({"url": url})
+    assert "NEED_CONFIRM" in r1
+    assert calls == [], "未批准不应发请求"
+    # 批准后 → 放行
+    approvals.approve(url)
+    r2 = fetch_url.invoke({"url": url})
+    assert "示例页面内容" in r2
+    assert calls == [url]
+    # 一次性消费：再次调用同 URL 需重新批准
+    r3 = fetch_url.invoke({"url": url})
+    assert "NEED_CONFIRM" in r3
+
+
+def test_fetch_url_github_no_confirm_needed(monkeypatch):
+    """GitHub 域名自动放行，无需确认。"""
+    import tools as tools_mod
+
+    def _fake_get(url, allowed_hosts=None, timeout=15):
+        return url, "<html><body>github 页面</body></html>".encode("utf-8")
+
+    monkeypatch.setattr(tools_mod, "_http_get", _fake_get)
+    from tools import fetch_url
+
+    r = fetch_url.invoke({"url": "https://github.com/pray0411/langgraph-doc-agent"})
+    assert "NEED_CONFIRM" not in r
+    assert "github 页面" in r
 
 
 def test_fetch_url_github_repo_reads_readme(monkeypatch):
@@ -1544,7 +1597,7 @@ def test_fetch_url_github_repo_reads_readme(monkeypatch):
 
     calls: list[str] = []
 
-    def _fake_get(url, timeout=15):
+    def _fake_get(url, allowed_hosts=None, timeout=15):
         calls.append(url)
         if "raw.githubusercontent.com" in url:
             return url, "# Pray\n\n一个 LangGraph 通用 Agent 项目。".encode("utf-8")
@@ -1565,7 +1618,7 @@ def test_fetch_url_readme_missing_falls_back_to_page(monkeypatch):
     class HTTP404(Exception):
         pass
 
-    def _fake_get(url, timeout=15):
+    def _fake_get(url, allowed_hosts=None, timeout=15):
         if "raw.githubusercontent.com" in url:
             raise HTTP404("404 Not Found")
         return url, "<html><head><script>var x=1;</script><style>.a{}</style></head><body><h1>仓库名</h1><p>这是仓库说明。</p></body></html>".encode("utf-8")
@@ -1582,7 +1635,7 @@ def test_fetch_url_api_github_returns_json(monkeypatch):
     """api.github.com 应原样返回 JSON 元数据（模型可直接读）。"""
     import tools as tools_mod
 
-    def _fake_get(url, timeout=15):
+    def _fake_get(url, allowed_hosts=None, timeout=15):
         return url, b'{"full_name": "pray0411/langgraph-doc-agent", "stargazers_count": 42}'
 
     monkeypatch.setattr(tools_mod, "_http_get", _fake_get)
@@ -1597,7 +1650,7 @@ def test_fetch_url_text_cap(monkeypatch):
     import tools as tools_mod
     monkeypatch.setattr(tools_mod, "_FETCH_MAX_TEXT", 50)
 
-    def _fake_get(url, timeout=15):
+    def _fake_get(url, allowed_hosts=None, timeout=15):
         return url, ("长" * 200).encode("utf-8")
 
     monkeypatch.setattr(tools_mod, "_http_get", _fake_get)

@@ -539,10 +539,11 @@ def open_in_browser(file_path: str) -> str:
         return f"打开失败: {exc}"
 
 
-# ---------- fetch_url：只读抓取（GitHub 域名白名单） ----------
+# ---------- fetch_url：只读抓取（GitHub 白名单自动放行，其他域名需用户确认） ----------
 
-# 白名单：仅允许 GitHub 相关域名。逐跳校验（重定向也会重新检查），
-# 杜绝"看似 github 域名、实际跳到站外"的绕过。
+# 自动放行白名单：GitHub 相关域名。其他域名（如 arxiv.org / docs.python.org）
+# 必须用户确认后才可抓取（NEED_CONFIRM → 前端弹窗 → /api/approve 登记 →
+# 同 URL 重试放行），机制与 run_command 高危命令一致。
 _FETCH_ALLOWED_HOSTS = {
     "github.com",
     "api.github.com",
@@ -554,8 +555,12 @@ _FETCH_MAX_TEXT = 6000       # 返回给模型的文本上限（字符，防撑�
 _USER_AGENT = "Pray-DocAgent/1.0 (read-only fetch)"
 
 
-def _check_fetch_url(url: str) -> str:
-    """校验 URL 协议与域名白名单，返回 hostname；不合法抛 ValueError。"""
+def _validate_fetch_url(url: str) -> str:
+    """校验 URL 非空、长度与协议（http/https），返回 hostname；不合法抛 ValueError。
+
+    不做域名白名单拦截——域名放行由 fetch_url 入口统一判断（白名单自动放行
+    或用户已批准）。
+    """
     from urllib.parse import urlsplit
 
     if not url or len(url) > 2000:
@@ -563,10 +568,32 @@ def _check_fetch_url(url: str) -> str:
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https"):
         raise ValueError("仅支持 http/https 协议")
-    host = (parts.hostname or "").lower()
-    if host not in _FETCH_ALLOWED_HOSTS:
-        raise ValueError(f"域名 {host} 不在白名单（仅允许 GitHub 相关域名）")
-    return host
+    return (parts.hostname or "").lower()
+
+
+def _host_allowed(host: str, allowed_hosts: set[str]) -> bool:
+    """host 是否在允许集合内（含其子域名，如 www.example.com 属于 example.com）。
+
+    endswith(".base") 精确子域名匹配，杜绝 example.com.evil.com 这类后缀伪造。
+    """
+    if host in allowed_hosts:
+        return True
+    return any(host.endswith("." + base) for base in allowed_hosts)
+
+
+def _fetch_needs_confirm(url: str, host: str) -> str | None:
+    """非白名单域名：未获用户批准则返回 NEED_CONFIRM 文本，否则 None。"""
+    if _host_allowed(host, _FETCH_ALLOWED_HOSTS):
+        return None
+    from approvals import is_approved
+
+    if is_approved(url):
+        return None
+    # 文本格式与 run_command 的 NEED_CONFIRM 完全一致，前端确认弹窗零改动复用
+    return (
+        f"NEED_CONFIRM 需要用户确认：高危命令 [{url}] 是否执行？"
+        "（抓取非 GitHub 域名需用户确认；确认后请用**完全相同的 URL** 重试）"
+    )
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):  # noqa: N801
@@ -576,8 +603,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):  # noqa: N801
         return None
 
 
-def _http_get(url: str, timeout: float = _FETCH_TIMEOUT) -> tuple[str, bytes]:
-    """逐跳 GET（每跳校验白名单），返回 (最终URL, 原始字节)。"""
+def _http_get(url: str, allowed_hosts: set[str], timeout: float = _FETCH_TIMEOUT) -> tuple[str, bytes]:
+    """逐跳 GET（每跳校验域名在允许集合内），返回 (最终URL, 原始字节)。"""
     import urllib.error
     import urllib.request
     from urllib.parse import urljoin
@@ -585,7 +612,9 @@ def _http_get(url: str, timeout: float = _FETCH_TIMEOUT) -> tuple[str, bytes]:
     current = url
     opener = urllib.request.build_opener(_NoRedirect)
     for _ in range(6):
-        _check_fetch_url(current)  # 每跳重新校验域名
+        host = _validate_fetch_url(current)
+        if not _host_allowed(host, allowed_hosts):
+            raise ValueError(f"拒绝访问：域名 {host} 不在允许范围")
         req = urllib.request.Request(
             current,
             headers={"User-Agent": _USER_AGENT, "Accept": "text/html,application/json,*/*"},
@@ -632,25 +661,33 @@ def _github_repo_path(url: str) -> tuple[str, str] | None:
 
 @tool
 def fetch_url(url: str) -> str:
-    """只读获取网页/接口内容（GitHub 域名白名单）。
+    """只读获取网页/接口内容（GitHub 域名自动放行，其他域名需用户确认）。
 
-    当需要**查看某个 GitHub 仓库的真实内容**（锐评项目、了解其 README/代码、
-    核对接口返回）时调用——web_search 只能搜到页面标题摘要，拿不到仓库正文。
-    - 仓库根 URL（https://github.com/<owner>/<repo>）自动抓取 README
+    当需要**查看某个页面的真实内容**（锐评 GitHub 项目、读文档、核对接口
+    返回）时调用——web_search 只能搜到标题摘要，拿不到正文。
+    - GitHub 仓库根 URL（https://github.com/<owner>/<repo>）自动抓 README
     - https://api.github.com/repos/<owner>/<repo> 返回仓库元数据 JSON
-      （star 数/语言/描述/更新时间等）
-    - 其余 github.com / raw.githubusercontent.com 页面按文本提取返回
+    - 其余 GitHub 页面按文本提取返回
 
-    只读安全设计：仅允许 GitHub 相关域名（github.com / api.github.com /
-    raw.githubusercontent.com），仅 GET、不执行任何代码、重定向逐跳校验域名
-    白名单、响应大小上限。**不要**用它抓取其他网站，也不要改用
-    run_command + curl（curl 命中高危规则需用户确认，且无白名单保护）。
+    域名规则与安全：
+    - github.com / api.github.com / raw.githubusercontent.com（含子域名）**自动放行**
+    - 其他域名（如 arxiv.org、docs.python.org）返回 NEED_CONFIRM，需用户确认；
+      用户确认后请用**完全相同的 URL** 重新调用本工具（前端会登记批准并自动续问）
+    - 只读设计：仅 GET、不执行任何代码、重定向逐跳校验域名、响应大小上限
+    - **不要**改用 run_command + curl（无白名单保护）
 
     Args:
         url: 要读取的完整 URL（http/https）
     """
     try:
-        host = _check_fetch_url(url)
+        host = _validate_fetch_url(url)
+        confirm = _fetch_needs_confirm(url, host)
+        if confirm:
+            return confirm
+        # 允许域名 = 白名单 ∪ 本次已批准域名（重定向到其他域名仍被拒）
+        allowed = set(_FETCH_ALLOWED_HOSTS)
+        if not _host_allowed(host, allowed):
+            allowed.add(host)
         repo = _github_repo_path(url)
         if repo:
             # 仓库根 URL：优先抓 README（raw.githubusercontent 的 HEAD 分支），失败退回仓库主页
@@ -658,16 +695,16 @@ def fetch_url(url: str) -> str:
             for readme in ("README.md", "readme.md", "Readme.md"):
                 try:
                     raw_url = f"https://raw.githubusercontent.com/{owner}/{name}/HEAD/{readme}"
-                    final_url, data = _http_get(raw_url)
+                    final_url, data = _http_get(raw_url, allowed)
                     text = data.decode("utf-8", errors="replace")
                     if text.strip():
                         return f"README（{final_url}）：\n" + text.strip()[:_FETCH_MAX_TEXT]
                 except Exception:  # noqa: BLE001
                     continue
-            final_url, data = _http_get(url)
+            final_url, data = _http_get(url, allowed)
             text = _html_to_text(data.decode("utf-8", errors="replace"))
         else:
-            final_url, data = _http_get(url)
+            final_url, data = _http_get(url, allowed)
             raw = data.decode("utf-8", errors="replace")
             # api.github.com 返回 JSON（模型可直接读）；HTML 页面转纯文本
             text = raw if host == "api.github.com" else _html_to_text(raw)
