@@ -155,9 +155,11 @@
   .code-copy { position: absolute; top: 6px; right: 6px; border: 1px solid var(--border); background: var(--bg-input); color: var(--text-dim); font-size: 11px; padding: 3px 8px; border-radius: 6px; cursor: pointer; opacity: 0; transition: opacity .15s; }
   .md pre:hover .code-copy { opacity: 1; }
   .code-copy:hover { color: var(--accent); border-color: var(--accent); }
-  .code-run { position: absolute; top: 6px; right: 52px; border: 1px solid var(--accent); background: var(--accent); color: #fff; font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: pointer; opacity: 0; transition: opacity .15s; }
-  .md pre:hover .code-run { opacity: 1; }
+  /* 运行按钮：始终可见（核心功能，不依赖 hover） */
+  .code-run { position: absolute; top: 6px; right: 52px; border: 1px solid var(--accent); background: var(--accent); color: #fff; font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: pointer; }
   .code-run:hover { background: var(--accent-dark); }
+  /* Python 等不可运行代码的提示条 */
+  .code-run-hint { position: absolute; top: 6px; right: 52px; font-size: 11px; color: var(--text-dim); padding: 3px 8px; }
 
   /* 代码运行弹窗 */
   .run-modal { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; z-index: 100; animation: fadeIn .15s ease; }
@@ -434,13 +436,16 @@ function renderInline(text) {
 function renderCodeBlock(code, lang) {
   const id = 'code-' + Math.random().toString(36).slice(2, 8);
   const safe = esc(code);
-  // HTML 代码块（含 <html>/<!DOCTYPE> 或 lang 含 html）→ 提供"运行"按钮，
-  // 点击后在沙箱 iframe 里渲染，用户可直接在页面中游玩
+  // HTML 代码块（含 <html>/<!DOCTYPE> 或 lang 含 html）→ 显示『▶ 运行』按钮
   const isHtml = (lang || '').toLowerCase().includes('html')
     || /<!doctype|<html[\s>]|<script[\s>]/i.test(code);
-  const runBtn = isHtml
-    ? '<button class="code-run" data-code="' + id + '">▶ 运行</button>'
-    : '';
+  let runBtn = '';
+  if (isHtml) {
+    runBtn = '<button class="code-run" data-code="' + id + '">▶ 运行</button>';
+  } else if (lang) {
+    // 其他语言（python 等）：提示不可在浏览器直接运行
+    runBtn = '<span class="code-run-hint" title="浏览器无法直接运行 ' + esc(lang) + '，如需可玩版本请让 AI 用 HTML 写">' + esc(lang) + ' ⚠</span>';
+  }
   return '<pre><code>' + safe + '</code>' +
     '<button class="code-copy" data-target="' + id + '">复制</button>' +
     runBtn + '</pre>';
