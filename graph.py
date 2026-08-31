@@ -159,6 +159,13 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
         model=model,
         tools=[search_documents, web_search, get_weather, write_file],
         checkpointer=memory or get_memory(),
+        # 系统提示：定义 Agent 的落盘行为准则（写代码类任务应主动调用 write_file）
+        prompt=(
+            "你是 Pray，一个能自主调用工具的 AI 助手。"
+            "行为准则：当用户让你写代码/生成脚本/创建程序时，调用 write_file 工具"
+            "把完整代码落盘（无需用户明确要求保存），并在回答中告知保存路径；"
+            "纯对话性回答不需要写文件。"
+        ),
     )
     # 挂 usage 回调供 _usage_of 读取（随 agent 缓存一起保存）
     agent.__usage_handler = usage_handler  # type: ignore[attr-defined]

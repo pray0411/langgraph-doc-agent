@@ -177,9 +177,6 @@
   .code-run:hover { background: var(--accent-dark); }
   /* Python 等不可运行代码的提示条（摘要行内） */
   .code-run-hint { font-size: 11px; color: var(--text-dim); padding: 3px 8px; flex-shrink: 0; cursor: help; }
-  /* 下载按钮：摘要行内，始终可见 */
-  .code-dl { border: 1px solid var(--border); background: var(--bg-input); color: var(--text); font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: pointer; flex-shrink: 0; }
-  .code-dl:hover { border-color: var(--accent); color: var(--accent); }
 
   /* 代码运行弹窗 */
   .run-modal { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; z-index: 100; animation: fadeIn .15s ease; }
@@ -469,17 +466,11 @@ function renderCodeBlock(code, lang) {
     // 其他语言（python 等）：提示不可在浏览器直接运行
     runBtn = '<span class="code-run-hint" title="浏览器无法直接运行 ' + esc(lang) + '，如需可玩版本请让 AI 用 HTML 写">' + esc(lang) + ' ⚠</span>';
   }
-  // 下载按钮：所有代码块都有（落盘到本地文件，浏览器下载由用户确认位置）
-  const ext = ({ 'python': 'py', 'javascript': 'js', 'js': 'js', 'html': 'html', 'css': 'css',
-                 'json': 'json', 'bash': 'sh', 'shell': 'sh', 'sql': 'sql', 'yaml': 'yml',
-                 'typescript': 'ts', 'ts': 'ts', 'markdown': 'md', 'java': 'java',
-                 'c': 'c', 'cpp': 'cpp', 'go': 'go', 'rust': 'rs' })[langLabel] || 'txt';
-  const dlBtn = '<button class="code-dl" data-code="' + id + '" title="保存为 ' + ext + ' 文件">⬇ 下载</button>';
-  // 默认折叠：摘要行 = 语言 + 行数 + 运行/下载按钮 + 展开提示；点开显示完整代码与复制按钮
+  // 默认折叠：摘要行 = 语言 + 行数 + 运行按钮 + 展开提示；点开显示完整代码与复制按钮
   return '<details class="code-block">' +
     '<summary><span class="cb-lang">' + esc(langLabel) + '</span>' +
     '<span class="cb-meta">' + lineCount + ' 行</span>' +
-    runBtn + dlBtn +
+    runBtn +
     '<span class="cb-toggle"></span></summary>' +
     '<pre><code>' + safe + '</code>' +
     '<button class="code-copy" data-target="' + id + '">复制</button>' +
@@ -1225,33 +1216,6 @@ document.addEventListener('click', (e) => {
   // Esc 关闭
   const escHandler = (ev) => { if (ev.key === 'Escape') { modal.remove(); document.removeEventListener('keydown', escHandler); } };
   document.addEventListener('keydown', escHandler);
-});
-
-// 代码块"下载"按钮：保存为本地文件（浏览器下载，用户确认保存位置）
-document.addEventListener('click', (e) => {
-  const btn = e.target.closest('.code-dl');
-  if (!btn) return;
-  e.stopPropagation();  // 阻止触发展开/收起
-  const details = btn.closest('details');
-  const pre = details ? details.querySelector('pre') : null;
-  const code = pre ? pre.querySelector('code').textContent : '';
-  if (!code) return;
-
-  // 文件名：优先从标题取扩展名，兜底 code.txt
-  const title = btn.title || '';
-  const extMatch = title.match(/\.(\w+)$/);
-  const filename = 'pray-' + Date.now().toString(36) + '.' + (extMatch ? extMatch[1] : 'txt');
-
-  const blob = new Blob([code], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  toast('已保存 ' + filename);
 });
 
 loadMode();
