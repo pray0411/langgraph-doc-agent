@@ -647,6 +647,8 @@ def get_session_messages(thread_id: str, limit: int = 100) -> list[dict]:
         ]
 
     messages = ((latest.checkpoint or {}).get("channel_values", {}) or {}).get("messages", []) or []
+    # 会话时间：checkpoint 的 ts（ISO 时间戳），历史消息用它近似每条消息的时间
+    session_time = str((latest.checkpoint or {}).get("ts", ""))
     result: list[dict] = []
     pending_tools: list[dict] = []      # 待并入下一条 AI 消息的工具调用
     pending_results: list[str] = []     # 工具结果文本（按顺序对应 pending_tools）
@@ -660,7 +662,7 @@ def get_session_messages(thread_id: str, limit: int = 100) -> list[dict]:
                 current_question = content
                 pending_tools = []
                 pending_results = []
-                result.append({"role": "user", "content": content, "tools": []})
+                result.append({"role": "user", "content": content, "tools": [], "time": session_time})
         elif mtype in ("ai", "assistant"):
             tools = _tools_of(m)
             if content:
@@ -687,6 +689,7 @@ def get_session_messages(thread_id: str, limit: int = 100) -> list[dict]:
                     "reflection": _build_reflection(current_question, content, all_tools, "history"),
                     "usage": usage,
                     "cost": _estimate_cost("deepseek", usage),
+                    "time": session_time,
                 })
                 pending_tools = []
                 pending_results = []

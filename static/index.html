@@ -124,7 +124,9 @@
   .msg.user .avatar { background: var(--bg-hover); color: var(--text-dim); border: 1px solid var(--border); }
   .msg-body { display: flex; flex-direction: column; gap: 4px; max-width: 82%; min-width: 0; }
   .msg.user .msg-body { align-items: flex-end; }
-  .msg-name { font-size: 12px; color: var(--text-dim); padding: 0 4px; }
+  .msg-name { font-size: 12px; color: var(--text-dim); padding: 0 4px; display: flex; align-items: center; gap: 8px; }
+  .msg-author { color: var(--text-dim); }
+  .msg-time { font-size: 11px; color: var(--text-dim); opacity: .7; }
   .bubble { padding: 12px 18px; border-radius: 16px; font-size: 14.5px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
   .msg.assistant .bubble { background: var(--bubble-assistant); color: var(--text); border-top-left-radius: 4px; }
   .msg.user .bubble { background: var(--bubble-user); color: var(--bubble-user-text); border-top-right-radius: 4px; }
@@ -609,6 +611,17 @@ function renderMarkdown(md) {
 }
 
 /* ===== 消息渲染 ===== */
+function formatTime(ts) {
+  // ts 可为 Date 或 ISO 字符串；返回 "MM-DD HH:MM"（跨天）或 "HH:MM"（当天）
+  const d = ts ? new Date(ts) : new Date();
+  if (isNaN(d.getTime())) d = new Date();
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
+  if (d.toDateString() === now.toDateString()) return hm;
+  return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + hm;
+}
+
 function addMessage(role, content, opts = {}) {
   const welcome = document.getElementById('welcome');
   if (welcome) welcome.remove();
@@ -621,7 +634,9 @@ function addMessage(role, content, opts = {}) {
   body.className = 'msg-body';
   const name = document.createElement('div');
   name.className = 'msg-name';
-  name.textContent = role === 'user' ? '你' : 'Pray';
+  // 名字 + 时间戳（实时消息用当前时间）
+  name.innerHTML = '<span class="msg-author">' + (role === 'user' ? '你' : 'Pray') + '</span>' +
+    '<span class="msg-time">' + formatTime() + '</span>';
   const bubble = document.createElement('div');
   if (role === 'assistant' && !opts.raw) {
     bubble.className = 'bubble md';
@@ -826,7 +841,7 @@ async function deleteSession(id) {
 }
 
 /* 加载并渲染历史会话消息 */
-function addHistoryMessage(role, content, tools, sources, reflection, usage, cost) {
+function addHistoryMessage(role, content, tools, sources, reflection, usage, cost, time) {
   const welcome = document.getElementById('welcome');
   if (welcome) welcome.remove();
   const msg = document.createElement('div');
@@ -838,7 +853,9 @@ function addHistoryMessage(role, content, tools, sources, reflection, usage, cos
   body.className = 'msg-body';
   const name = document.createElement('div');
   name.className = 'msg-name';
-  name.textContent = role === 'user' ? '你' : 'Pray';
+  // 名字 + 时间戳（历史消息用会话时间）
+  name.innerHTML = '<span class="msg-author">' + (role === 'user' ? '你' : 'Pray') + '</span>' +
+    '<span class="msg-time">' + formatTime(time) + '</span>';
   const bubble = document.createElement('div');
   if (role === 'assistant') {
     bubble.className = 'bubble md';
@@ -895,7 +912,7 @@ function switchSession(id) {
       } else {
         msgs.forEach(m => addHistoryMessage(
           m.role === 'user' ? 'user' : 'assistant',
-          m.content, m.tools, m.sources, m.reflection, m.usage, m.cost
+          m.content, m.tools, m.sources, m.reflection, m.usage, m.cost, m.time
         ));
       }
       scrollBottom();
