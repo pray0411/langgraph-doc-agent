@@ -361,8 +361,9 @@ def test_legacy_files_not_imported_by_runtime():
     """运行时代码不应 import legacy 模块（防止双封装回归）。"""
     import ast
 
+    repo_root = Path(__file__).resolve().parent.parent
     for fname in ("graph.py", "server.py", "main.py", "tools.py"):
-        tree = ast.parse(Path(fname).read_text(encoding="utf-8"))
+        tree = ast.parse((repo_root / fname).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 assert node.module not in ("llm", "graph_v1"), f"{fname} import 了 legacy 模块"
@@ -808,52 +809,6 @@ def test_is_ollama_available_parses_url(monkeypatch):
 
 
 # ---------- Token 用量与成本 ----------
-
-def test_extract_usage_from_ai_messages():
-    """应从 AI 消息的 response_metadata.usage 提取 token 用量。"""
-    from graph import _extract_usage
-
-    class FakeAIMessage:
-        type = "ai"
-        content = "hi"
-
-        def __init__(self, usage):
-            self.response_metadata = {"usage": usage} if usage else {}
-
-    msgs = [
-        FakeAIMessage({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}),
-    ]
-    usage = _extract_usage(msgs)
-    assert usage == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-
-
-def test_extract_usage_supports_token_usage_field():
-    """应兼容 DeepSeek 的 token_usage 字段名（非标准 usage）。"""
-    from graph import _extract_usage
-
-    class FakeAIMessage:
-        type = "ai"
-        content = "hi"
-        response_metadata = {
-            "token_usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
-        }
-
-    usage = _extract_usage([FakeAIMessage()])
-    assert usage == {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
-
-
-def test_extract_usage_none_when_missing():
-    """无 usage 元数据时应返回 None。"""
-    from graph import _extract_usage
-
-    class FakeAIMessage:
-        type = "ai"
-        content = "hi"
-        response_metadata = {}
-
-    assert _extract_usage([FakeAIMessage()]) is None
-    assert _extract_usage([]) is None
-
 
 def test_estimate_cost_deepseek():
     """deepseek 单价应能估算成本。"""

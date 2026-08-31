@@ -14,13 +14,14 @@ import queue
 import re
 import subprocess
 import threading
+import time
 import uuid
 from pathlib import Path
 
 from config import WRITE_DIR
 
-# 复用 run_command 的黑名单（从 tools 导入避免重复定义）
-from tools import _BLOCKED_PATTERNS
+# 复用 run_command 的黑名单与高危名单（从 tools 导入避免重复定义）
+from tools import _BLOCKED_PATTERNS, _HIGH_RISK_PATTERNS
 
 # session: {session_id: {"proc", "out_q", "poll_offset", "done"}}
 _sessions: dict[str, dict] = {}
@@ -42,6 +43,11 @@ def start(command: str) -> dict:
     blocked = _blocked(command)
     if blocked:
         return {"error": blocked}
+    # 高危命令（删除/移动/安装包/联网下载等）须用户批准（approvals 登记）
+    if any(re.search(p, command, re.IGNORECASE) for p in _HIGH_RISK_PATTERNS):
+        from approvals import is_approved
+        if not is_approved(command):
+            return {"error": "NEED_CONFIRM 高危命令需要用户确认后重试"}
 
     cwd = str(Path(WRITE_DIR).resolve())
     env = dict(os.environ)
@@ -84,6 +90,7 @@ def start(command: str) -> dict:
             "offset": 0,
             "done": done,
             "buffer": [],
+            "last_active": time.time(),
         }
     return {"session_id": session_id}
 
@@ -111,6 +118,7 @@ def poll(session_id: str) -> dict:
         sess = _sessions.get(session_id)
     if not sess:
         return {"error": "会话不存在"}
+    sess["last_active"] = time.time()
 
     new_lines = []
     while True:
@@ -157,3 +165,20 @@ def stop(session_id: str) -> dict:
 def list_active() -> int:
     with _sessions_lock:
         return len(_sessions)
+
+
+# 闲置超时：会话超过该时长无轮询即自动终止（防内存泄漏）
+_STALE_TIMEOUT = 600  # 秒（10 分钟）
+
+
+def sweep_stale() -> int:
+    """清理闲置超时的会话（进程终止 + 记录移除），返回清理数量。"""
+    now = time.time()
+    stale_ids = []
+    with _sessions_lock:
+        for sid, sess in _sessions.items():
+            if now - sess.get("last_active", now) > _STALE_TIMEOUT:
+                stale_ids.append(sid)
+    for sid in stale_ids:
+        stop(sid)
+    return len(stale_ids)

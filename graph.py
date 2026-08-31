@@ -42,6 +42,9 @@ class AgentResult(TypedDict, total=False):
 # 加锁防并发竞态：ThreadingHTTPServer 多线程首次请求时可能同时初始化。
 _memory = None
 _memory_lock = threading.Lock()
+# SQLite 连接访问锁：单连接被多线程共享（check_same_thread=False），
+# 并发读写 checkpoint 有 database is locked 风险——所有 saver 操作持此锁
+_memory_access_lock = threading.Lock()
 
 
 def get_memory() -> SqliteSaver:
@@ -104,11 +107,18 @@ class _UsageCapture(BaseCallbackHandler):
             acc["total_tokens"] += usage.get("total_tokens", 0)
 
     def get(self, thread_id: str) -> dict | None:
+        """读取指定线程的本轮累计用量，读取后清零（一次性消费）。
+
+        这样前端"过程详情"显示的是**本轮** token 用量而非历史总和；
+        同时清理记录防止 _by_thread 无限增长。
+        """
         with self._lock:
             acc = self._by_thread.get(thread_id or "default")
             if acc is None:
                 return None
-            return dict(acc)
+            result = dict(acc)
+            del self._by_thread[thread_id or "default"]  # 读完即清，防内存泄漏
+            return result
 
 
 def _usage_of(agent, thread_id: str = "") -> dict | None:
@@ -164,10 +174,12 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
         )
     else:
         # 在线模式：从 provider 配置统一获取（网页端可动态更换 Key）
-        from config import get_provider_config
+        from config import LLM_BASE_URL, get_provider_config
         pcfg = get_provider_config(provider)
         api_key = pcfg.get("api_key") or "empty-key-placeholder"
-        base_url = pcfg.get("base_url") or "https://api.deepseek.com/v1"
+        # LLM_BASE_URL 作为全局兜底（未在 provider 配置里指定时生效），
+        # 支持自定义 OpenAI 兼容网关，如 one-api / vLLM。
+        base_url = pcfg.get("base_url") or LLM_BASE_URL or "https://api.deepseek.com/v1"
         model_name = pcfg.get("model") or LLM_MODEL
 
         model = ChatOpenAI(
@@ -510,29 +522,6 @@ def _build_reflection(question: str, answer: str, tool_calls: list[dict], mode: 
 
 # ---------- Token 用量与成本 ----------
 
-def _extract_usage(messages: list) -> dict | None:
-    """从消息序列中提取最近一次模型调用的 token 用量。
-
-    来源：AIMessage.response_metadata 中的 usage（OpenAI 标准）或
-    token_usage（DeepSeek 返回的实际字段名）。
-    返回: {"prompt_tokens", "completion_tokens", "total_tokens"} 或 None。
-    """
-    usage = None
-    for m in messages:
-        if isinstance(m, dict):
-            meta = m.get("response_metadata", {}) or {}
-        else:
-            meta = getattr(m, "response_metadata", None) or {}
-        u = meta.get("usage") or meta.get("token_usage") or {}
-        if isinstance(u, dict) and u.get("total_tokens"):
-            usage = {
-                "prompt_tokens": u.get("prompt_tokens", 0),
-                "completion_tokens": u.get("completion_tokens", 0),
-                "total_tokens": u.get("total_tokens", 0),
-            }
-    return usage
-
-
 def _estimate_cost(provider: str, usage: dict | None) -> dict | None:
     """按服务商单价估算本次调用成本（人民币，仅供展示）。
 
@@ -584,11 +573,12 @@ def list_sessions(limit: int = 50) -> list[dict]:
     # list(None) 返回全部 thread 的所有历史 checkpoint，顺序为最新在前；
     # 用 setdefault 保留每个 thread 的第一条（即最新）checkpoint
     latest: dict[str, object] = {}
-    for t in saver.list(None):
-        thread_id = (t.config.get("configurable") or {}).get("thread_id", "")
-        if not thread_id:
-            continue
-        latest.setdefault(thread_id, t)
+    with _memory_access_lock:
+        for t in saver.list(None):
+            thread_id = (t.config.get("configurable") or {}).get("thread_id", "")
+            if not thread_id:
+                continue
+            latest.setdefault(thread_id, t)
 
     sessions = []
     for thread_id, t in latest.items():
@@ -614,9 +604,11 @@ def list_sessions(limit: int = 50) -> list[dict]:
     return sessions[:limit]
 
 
-def get_session_messages(thread_id: str, limit: int = 100) -> list[dict]:
+def get_session_messages(thread_id: str, limit: int = 100, provider: str = "") -> list[dict]:
     """读取指定会话的历史消息（供前端回放）。
 
+    provider: 成本估算用的服务商（默认取当前 LLM_PROVIDER），
+    不再硬编码 deepseek——不同服务商按各自单价估算。
     从 checkpointer 取该 thread 的最新 checkpoint，提取 human/ai 消息
     （跳过 tool 消息）。中间态 AI 消息（仅 tool_calls 无文本）的工具名
     合并进下一条有文本的 AI 消息；并基于每轮的工具调用结果生成
@@ -626,11 +618,12 @@ def get_session_messages(thread_id: str, limit: int = 100) -> list[dict]:
     saver = get_memory()
     # 该 thread 的最新 checkpoint（list 返回最新在前）
     latest = None
-    for t in saver.list(None):
-        tid = (t.config.get("configurable") or {}).get("thread_id", "")
-        if tid == thread_id:
-            latest = t
-            break
+    with _memory_access_lock:
+        for t in saver.list(None):
+            tid = (t.config.get("configurable") or {}).get("thread_id", "")
+            if tid == thread_id:
+                latest = t
+                break
     if latest is None:
         return []
 
@@ -688,7 +681,7 @@ def get_session_messages(thread_id: str, limit: int = 100) -> list[dict]:
                     # 无工具调用也生成 reflection，保证前端"过程详情"面板始终存在
                     "reflection": _build_reflection(current_question, content, all_tools, "history"),
                     "usage": usage,
-                    "cost": _estimate_cost("deepseek", usage),
+                    "cost": _estimate_cost(provider or LLM_PROVIDER, usage),
                     "time": session_time,
                 })
                 pending_tools = []
@@ -706,5 +699,6 @@ def get_session_messages(thread_id: str, limit: int = 100) -> list[dict]:
 def delete_session(thread_id: str) -> bool:
     """删除指定会话（checkpointer 的 thread）。"""
     saver = get_memory()
-    saver.delete_thread(thread_id)  # SqliteSaver.delete_thread 直接收 thread_id 字符串
+    with _memory_access_lock:
+        saver.delete_thread(thread_id)  # SqliteSaver.delete_thread 直接收 thread_id 字符串
     return True

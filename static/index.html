@@ -1440,7 +1440,8 @@ function openTerminal(code, codeId) {
         : 'python ' + tmpName;
     }
 
-    // 启动进程
+    // 启动进程（用户点击运行=确认命令，先登记批准供高危命令通过）
+    await api('/api/approve', { command: cmd }).catch(() => {});
     const startResp = await api('/api/run/start', { command: cmd });
     if (startResp.error) { print(startResp.error); return; }
     const sid = startResp.session_id;

@@ -19,6 +19,7 @@ import threading
 from collections import Counter
 from pathlib import Path
 
+import config
 from config import CHUNK_OVERLAP, CHUNK_SIZE, DOCS_DIR, EMBEDDING_MODEL, INDEX_DIR, INDEX_FILE
 
 SUPPORTED_EXTS = {".md", ".txt", ".py", ".rst", ".html"}
@@ -270,7 +271,8 @@ def load_index() -> dict:
 # ---------- 检索 ----------
 
 # 最低分数阈值：混合检索融合分；无任何通道命中的片段不参与融合
-MIN_SCORE = 0.0
+# 从 config 读取（用户可通过 .env 的 MIN_SCORE 配置），勿在模块级硬编码覆盖
+MIN_SCORE = config.MIN_SCORE
 
 
 def _cosine(vec_a: list[float], vec_b: list[float]) -> float:

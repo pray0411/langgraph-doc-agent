@@ -22,6 +22,7 @@ POST /api/run/stop  -> 终止终端进程
 """
 import json
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -102,12 +103,31 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return self.headers.get("X-API-Token", "") == API_TOKEN
 
+    def _csrf_ok(self) -> bool:
+        """CSRF 防护：状态变更请求（POST/DELETE）必须来自本站。
+
+        恶意网页可用 form 表单（simple request，无 CORS 预检）向本机端口
+        发请求——若不校验，浏览器会替你调用 /api/run/start 执行任意命令。
+        Origin/Referer 头由浏览器设置且跨站无法伪造：
+        - Origin 存在 → 必须匹配本站（127.0.0.1:8000）
+        - Origin 缺失 → 非浏览器客户端（curl/脚本），放行
+        """
+        origin = self.headers.get("Origin", "")
+        if not origin:
+            return True  # 非浏览器客户端
+        # 仅接受来自本站的请求
+        allowed = ("127.0.0.1", "localhost")
+        return any(f"//{h}" in origin or f"://{h}" in origin for h in allowed)
+
     def _auth_required(self) -> bool:
-        """校验 token；失败时写 401 并返回 False。"""
-        if self._auth_ok():
-            return True
-        self._json({"error": "缺少或无效的 API Token（请在 .env 配置 API_TOKEN）"}, 401)
-        return False
+        """校验 token + CSRF；失败时写 401/403 并返回 False。"""
+        if not self._auth_ok():
+            self._json({"error": "缺少或无效的 API Token（请在 .env 配置 API_TOKEN）"}, 401)
+            return False
+        if self.command in ("POST", "DELETE", "PUT", "PATCH") and not self._csrf_ok():
+            self._json({"error": "跨站请求被拒绝（CSRF 防护）"}, 403)
+            return False
+        return True
 
     def do_GET(self):  # noqa: N802
         if self.path in ("/", "/index.html"):
@@ -366,7 +386,10 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_session_messages(self, thread_id: str):
         from graph import get_session_messages
 
-        self._json({"thread_id": thread_id, "messages": get_session_messages(thread_id)})
+        self._json({
+            "thread_id": thread_id,
+            "messages": get_session_messages(thread_id, provider=get_mode()),
+        })
 
     def _handle_delete_session(self, thread_id: str):
         from graph import delete_session
@@ -499,4 +522,19 @@ class Handler(BaseHTTPRequestHandler):
 def run(host: str = "127.0.0.1", port: int = 8000):
     print(f"网页服务已启动: http://{host}:{port}")
     print("按 Ctrl+C 停止。")
+
+    # 后台线程定期清理闲置终端会话（防内存泄漏）
+    def _sweep_loop():
+        import runterm
+
+        while True:
+            time.sleep(120)
+            try:
+                n = runterm.sweep_stale()
+                if n:
+                    print(f"[runterm] 清理 {n} 个闲置会话")
+            except Exception:  # noqa: BLE001
+                pass
+
+    threading.Thread(target=_sweep_loop, daemon=True).start()
     ThreadingHTTPServer((host, port), Handler).serve_forever()
