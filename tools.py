@@ -289,3 +289,35 @@ def run_command(command: str, input_text: str = "", confirmed: bool = False) -> 
         out = out[:_MAX_OUTPUT] + f"\n…（输出已截断，共 {len(out)} 字符）"
     status = f"✅ 执行成功（exit {result.returncode}）" if result.returncode == 0 else f"❌ 执行失败（exit {result.returncode}）"
     return f"{status}\n{out}" if out else status
+
+
+@tool
+def open_in_browser(file_path: str) -> str:
+    """用系统默认浏览器打开本地文件（HTML 游戏/页面交付用）。
+
+    当写完 HTML 文件（游戏/页面）后，调用本工具让用户在浏览器中直接体验——
+    例如写完 minesweeper.html 后 open_in_browser("minesweeper.html")。
+    只允许打开 WRITE_DIR 目录内的文件；非 HTML 文件会用系统默认程序打开。
+
+    Args:
+        file_path: WRITE_DIR 内的文件路径（如 "minesweeper.html"）
+    """
+    import os
+    import subprocess as _sp
+
+    from config import WRITE_DIR
+
+    write_root = Path(WRITE_DIR).resolve()
+    target = (write_root / file_path).resolve()
+    if not target.is_relative_to(write_root):
+        return f"拒绝打开：路径 {file_path} 超出允许目录 {write_root}"
+    if not target.exists():
+        return f"文件不存在: {file_path}"
+    try:
+        if os.name == "nt":
+            os.startfile(str(target))  # Windows 默认程序打开（HTML → 浏览器）
+        else:
+            _sp.Popen(["xdg-open", str(target)], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        return f"已在浏览器/默认程序中打开 {target.relative_to(write_root)}"
+    except Exception as exc:  # noqa: BLE001
+        return f"打开失败: {exc}"

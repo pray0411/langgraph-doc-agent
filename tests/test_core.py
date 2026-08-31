@@ -1099,3 +1099,28 @@ def test_runterm_blocks_destructive(monkeypatch, tmp_path):
 
     r = start("rm -rf /")
     assert "error" in r and "拦截" in r["error"]
+
+
+# ---------- open_in_browser 工具 ----------
+
+def test_open_in_browser_opens_file(monkeypatch, tmp_path):
+    """open_in_browser 应打开 WRITE_DIR 内存在的文件。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    from tools import open_in_browser, write_file
+
+    write_file.invoke({"file_path": "game.html", "content": "<html></html>"})
+    r = open_in_browser.invoke({"file_path": "game.html"})
+    assert "打开" in r
+
+
+def test_open_in_browser_rejects_escape_and_missing(monkeypatch, tmp_path):
+    """open_in_browser 应拒绝路径逃逸与不存在的文件。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    from tools import open_in_browser
+
+    r1 = open_in_browser.invoke({"file_path": "../../etc/passwd"})
+    assert "拒绝" in r1
+    r2 = open_in_browser.invoke({"file_path": "nope.html"})
+    assert "不存在" in r2

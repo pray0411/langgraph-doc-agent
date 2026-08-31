@@ -27,7 +27,7 @@ from langgraph.prebuilt import create_react_agent
 
 from config import LLM_MODEL, LLM_PROVIDER, MEMORY_DB
 from prompts import SYSTEM_PROMPT
-from tools import get_weather, run_command, search_documents, web_search, write_file
+from tools import get_weather, open_in_browser, run_command, search_documents, web_search, write_file
 
 
 class AgentResult(TypedDict, total=False):
@@ -158,7 +158,7 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
 
     agent = create_react_agent(
         model=model,
-        tools=[search_documents, web_search, get_weather, write_file, run_command],
+        tools=[search_documents, web_search, get_weather, write_file, run_command, open_in_browser],
         checkpointer=memory or get_memory(),
         # 系统提示：行为准则集中管理在 prompts.py（与工具 docstring 协同）
         prompt=SYSTEM_PROMPT,
