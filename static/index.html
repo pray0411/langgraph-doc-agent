@@ -155,6 +155,17 @@
   .code-copy { position: absolute; top: 6px; right: 6px; border: 1px solid var(--border); background: var(--bg-input); color: var(--text-dim); font-size: 11px; padding: 3px 8px; border-radius: 6px; cursor: pointer; opacity: 0; transition: opacity .15s; }
   .md pre:hover .code-copy { opacity: 1; }
   .code-copy:hover { color: var(--accent); border-color: var(--accent); }
+  .code-run { position: absolute; top: 6px; right: 52px; border: 1px solid var(--accent); background: var(--accent); color: #fff; font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: pointer; opacity: 0; transition: opacity .15s; }
+  .md pre:hover .code-run { opacity: 1; }
+  .code-run:hover { background: var(--accent-dark); }
+
+  /* 代码运行弹窗 */
+  .run-modal { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; z-index: 100; animation: fadeIn .15s ease; }
+  .run-modal-body { width: min(92vw, 640px); height: min(85vh, 560px); background: var(--bg); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 12px 40px rgba(0,0,0,.3); }
+  .run-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 600; }
+  .run-modal-close { border: none; background: none; color: var(--text-dim); font-size: 16px; cursor: pointer; padding: 2px 6px; border-radius: 5px; }
+  .run-modal-close:hover { background: var(--bg-hover); color: var(--text); }
+  .run-modal iframe { flex: 1; border: none; width: 100%; background: #fff; }
 
   /* ===== 工具状态 ===== */
   .tool-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-dim); margin: 2px 0; }
@@ -423,8 +434,16 @@ function renderInline(text) {
 function renderCodeBlock(code, lang) {
   const id = 'code-' + Math.random().toString(36).slice(2, 8);
   const safe = esc(code);
+  // HTML 代码块（含 <html>/<!DOCTYPE> 或 lang 含 html）→ 提供"运行"按钮，
+  // 点击后在沙箱 iframe 里渲染，用户可直接在页面中游玩
+  const isHtml = (lang || '').toLowerCase().includes('html')
+    || /<!doctype|<html[\s>]|<script[\s>]/i.test(code);
+  const runBtn = isHtml
+    ? '<button class="code-run" data-code="' + id + '">▶ 运行</button>'
+    : '';
   return '<pre><code>' + safe + '</code>' +
-    '<button class="code-copy" data-target="' + id + '">复制</button></pre>';
+    '<button class="code-copy" data-target="' + id + '">复制</button>' +
+    runBtn + '</pre>';
 }
 
 function renderMarkdown(md) {
@@ -1120,6 +1139,39 @@ document.addEventListener('click', (e) => {
   const pre = btn.closest('pre');
   const code = pre ? pre.querySelector('code').textContent : '';
   navigator.clipboard.writeText(code).then(() => toast('代码已复制'));
+});
+
+// HTML 代码块"运行"按钮：沙箱 iframe 渲染，用户可直接在页面中游玩
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.code-run');
+  if (!btn) return;
+  const pre = btn.closest('pre');
+  const code = pre ? pre.querySelector('code').textContent : '';
+  if (!code) return;
+
+  // 已有弹窗则先关闭
+  const old = document.querySelector('.run-modal');
+  if (old) old.remove();
+
+  const modal = document.createElement('div');
+  modal.className = 'run-modal';
+  modal.innerHTML =
+    '<div class="run-modal-body">' +
+      '<div class="run-modal-head"><span>▶ 运行结果</span>' +
+        '<button class="run-modal-close" title="关闭">✕</button></div>' +
+      '<iframe sandbox="allow-scripts" srcdoc=""></iframe>' +
+    '</div>';
+  document.body.appendChild(modal);
+
+  // srcdoc 转义（单引号/双引号/尖括号安全插入）
+  const iframe = modal.querySelector('iframe');
+  iframe.srcdoc = code.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+
+  modal.querySelector('.run-modal-close').addEventListener('click', () => modal.remove());
+  modal.addEventListener('click', (ev) => { if (ev.target === modal) modal.remove(); });
+  // Esc 关闭
+  const escHandler = (ev) => { if (ev.key === 'Escape') { modal.remove(); document.removeEventListener('keydown', escHandler); } };
+  document.addEventListener('keydown', escHandler);
 });
 
 loadMode();
