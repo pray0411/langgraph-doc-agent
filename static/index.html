@@ -172,11 +172,11 @@
   .code-copy { position: absolute; top: 6px; right: 6px; border: 1px solid var(--border); background: var(--bg-input); color: var(--text-dim); font-size: 11px; padding: 3px 8px; border-radius: 6px; cursor: pointer; opacity: 0; transition: opacity .15s; }
   .md pre:hover .code-copy { opacity: 1; }
   .code-copy:hover { color: var(--accent); border-color: var(--accent); }
-  /* 运行按钮：始终可见（核心功能，不依赖 hover） */
-  .code-run { position: absolute; top: 6px; right: 52px; border: 1px solid var(--accent); background: var(--accent); color: #fff; font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: pointer; }
+  /* 运行按钮：位于折叠摘要行内（flex 布局），代码折叠时也始终可见 */
+  .code-run { border: 1px solid var(--accent); background: var(--accent); color: #fff; font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: pointer; flex-shrink: 0; }
   .code-run:hover { background: var(--accent-dark); }
-  /* Python 等不可运行代码的提示条 */
-  .code-run-hint { position: absolute; top: 6px; right: 52px; font-size: 11px; color: var(--text-dim); padding: 3px 8px; }
+  /* Python 等不可运行代码的提示条（摘要行内） */
+  .code-run-hint { font-size: 11px; color: var(--text-dim); padding: 3px 8px; flex-shrink: 0; cursor: help; }
 
   /* 代码运行弹窗 */
   .run-modal { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; z-index: 100; animation: fadeIn .15s ease; }
@@ -455,7 +455,8 @@ function renderCodeBlock(code, lang) {
   const safe = esc(code);
   const lineCount = code.split('\n').length;
   const langLabel = (lang || 'code').toLowerCase();
-  // HTML 代码块（含 <html>/<!DOCTYPE> 或 lang 含 html）→ 显示『▶ 运行』按钮
+  // HTML 代码块（含 <html>/<!DOCTYPE> 或 lang 含 html）→ 摘要行显示『▶ 运行』按钮
+  // （始终可见，代码折叠时也能直接运行）
   const isHtml = langLabel.includes('html')
     || /<!doctype|<html[\s>]|<script[\s>]/i.test(code);
   let runBtn = '';
@@ -465,14 +466,15 @@ function renderCodeBlock(code, lang) {
     // 其他语言（python 等）：提示不可在浏览器直接运行
     runBtn = '<span class="code-run-hint" title="浏览器无法直接运行 ' + esc(lang) + '，如需可玩版本请让 AI 用 HTML 写">' + esc(lang) + ' ⚠</span>';
   }
-  // 默认折叠：摘要行显示语言/行数/展开提示，点开才显示完整代码（details 元素）
+  // 默认折叠：摘要行 = 语言 + 行数 + 运行按钮 + 展开提示；点开显示完整代码与复制按钮
   return '<details class="code-block">' +
     '<summary><span class="cb-lang">' + esc(langLabel) + '</span>' +
     '<span class="cb-meta">' + lineCount + ' 行</span>' +
+    runBtn +
     '<span class="cb-toggle">点击展开</span></summary>' +
     '<pre><code>' + safe + '</code>' +
     '<button class="code-copy" data-target="' + id + '">复制</button>' +
-    runBtn + '</pre>' +
+    '</pre>' +
     '</details>';
 }
 
@@ -1175,7 +1177,11 @@ document.addEventListener('click', (e) => {
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.code-run');
   if (!btn) return;
-  const pre = btn.closest('pre');
+  // 阻止冒泡：按钮位于 summary 内，避免点击运行同时触发展开/收起
+  e.stopPropagation();
+  // 按钮在折叠摘要行里，代码在 details > pre > code
+  const details = btn.closest('details');
+  const pre = details ? details.querySelector('pre') : null;
   const code = pre ? pre.querySelector('code').textContent : '';
   if (!code) return;
 
