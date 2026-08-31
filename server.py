@@ -21,6 +21,7 @@ POST /api/run/stop  -> 终止终端进程
 - 错误信息脱敏（不向客户端暴露内部异常细节）
 """
 import json
+import queue
 import threading
 import time
 import uuid
@@ -36,6 +37,9 @@ INDEX_HTML = Path(__file__).parent / "static" / "index.html"
 MAX_BODY = 10 * 1024
 # 单请求超时：60 秒（模型调用 + 工具调用可能较慢）
 REQUEST_TIMEOUT = 60
+# SSE 流式闲置超时：60 秒内无任何事件推送（token/工具状态）即判定卡死，
+# 推 error 事件并断流——防止模型调用或工具挂起时前端"正在思考"无限转圈。
+SSE_IDLE_TIMEOUT = 60
 
 # 有效在线模式（来自 config 的服务商预设 + ollama）
 def _valid_modes() -> list[str]:
@@ -386,15 +390,45 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"))
             self.wfile.flush()
 
-        try:
-            from graph import ask_stream
+        # 生成器改在子线程运行、经队列投递：主线程按 SSE_IDLE_TIMEOUT 等待事件，
+        # 超时（模型/工具挂起、无任何输出）即推 error 事件断流，前端转圈必然停止。
+        # 注：超时后 daemon 子线程无法被强制取消，模型调用仍会在后台跑完（同 /ask
+        # 的文档化限制），但连接已关闭，不会阻塞后续请求。
+        from graph import ask_stream
 
-            for event in ask_stream(question, mode=get_mode(), thread_id=thread_id):
+        event_q: queue.Queue = queue.Queue()
+
+        def _producer():
+            try:
+                for event in ask_stream(question, mode=get_mode(), thread_id=thread_id):
+                    event_q.put(event)
+            except Exception:  # noqa: BLE001
+                event_q.put({"type": "error", "message": "服务内部错误"})
+            finally:
+                event_q.put(None)  # 结束哨兵
+
+        threading.Thread(target=_producer, daemon=True).start()
+
+        while True:
+            try:
+                event = event_q.get(timeout=SSE_IDLE_TIMEOUT)
+            except queue.Empty:
+                try:
+                    sse({"type": "error", "message": "响应超时：模型或工具超过 60 秒无输出，已中断"})
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+            if event is None:
+                break
+            try:
                 sse(event)
+            except Exception:  # noqa: BLE001
+                return  # 客户端断开，停止投递
+        try:
             # 末尾补 thread_id（前端需要它续会话）
             sse({"type": "meta", "thread_id": thread_id})
         except Exception:  # noqa: BLE001
-            sse({"type": "error", "message": "服务内部错误"})
+            pass
 
     def _handle_list_sessions(self):
         from graph import list_sessions

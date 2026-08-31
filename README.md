@@ -14,7 +14,13 @@
 | 💾 代码落盘 | `write_file` | "写一个猜数字游戏"（AI 主动落盘） |
 | ▶️ 命令执行 | `run_command` | "运行 calculator.py 验证"（写→跑→修闭环） |
 | 🌐 打开浏览器 | `open_in_browser` | "做个扫雷游戏"（自动生成 HTML 并打开） |
+| 📖 网页抓取 | `fetch_url` | "锐评这个 GitHub 项目"（白名单只读抓取 README/元数据） |
 | 💬 普通对话 | （直答） | "你好，你是谁？" |
+
+> **网页抓取**：`fetch_url` 用于读取 GitHub 仓库真实内容（锐评/分析项目场景）。
+> 只读安全设计：仅允许 `github.com` / `api.github.com` / `raw.githubusercontent.com`
+> 三个域名，仅 GET、不执行任何代码，重定向逐跳校验白名单，响应大小上限。
+> 仓库根 URL 自动抓 README；元数据走 `api.github.com/repos/<owner>/<repo>` JSON。
 
 > **代码落盘**：AI 写代码类任务时**主动**调用 `write_file` 落盘到 `generated/`
 > 目录（`WRITE_DIR` 可配置）。安全边界：只允许写入该目录内，`../` 逃逸与
@@ -172,7 +178,7 @@ python -X utf8 main.py web
 ```
 langgraph-doc-agent/
 ├── graph.py         # ★ 核心：langchain create_agent 通用 Agent + 反思逻辑 + checkpointer 记忆
-├── tools.py         # 工具集：search_documents / web_search / get_weather / write_file / run_command / open_in_browser
+├── tools.py         # 工具集：search_documents / web_search / get_weather / write_file / run_command / open_in_browser / fetch_url
 ├── retriever.py     # jieba+BM25 + embedding 语义的 RRF 混合检索
 ├── server.py        # 网页服务（并发安全、请求超时、API Token 鉴权）
 ├── runterm.py       # 交互终端会话（子进程管理：启动/输入/输出/停止）

@@ -753,6 +753,61 @@ def test_http_csrf_allows_same_origin(http_server):
         assert r.status == 200
 
 
+# ---------- SSE 流式（真实 HTTP） ----------
+
+def _sse_post(base, question, extra="", timeout=10):
+    """POST /ask/stream，返回 (状态码, 完整响应体)。"""
+    data = urllib.parse.urlencode({"question": question}).encode() + extra.encode()
+    req = urllib.request.Request(
+        base + "/ask/stream", data=data, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8")
+
+
+def test_http_sse_normal_stream(http_server, monkeypatch):
+    """真实 HTTP：SSE 正常流应含 token 事件、done 事件与 meta 事件。"""
+    base, _ = http_server
+    import graph as graph_mod
+
+    def _fake_stream(question, mode=None, thread_id=None):
+        yield {"type": "start", "mode": "deepseek"}
+        yield {"type": "token", "content": "你好"}
+        yield {"type": "token", "content": "世界"}
+        yield {"type": "done", "answer": "你好世界", "sources": [], "reflection": "{}"}
+
+    monkeypatch.setattr(graph_mod, "ask_stream", _fake_stream)
+    status, body = _sse_post(base, "测试")
+    assert status == 200
+    assert '"type": "token"' in body
+    assert '"type": "done"' in body
+    assert '"type": "meta"' in body
+    assert '"thread_id"' in body
+
+
+def test_http_sse_idle_timeout_emits_error(http_server, monkeypatch):
+    """真实 HTTP：SSE 60 秒无事件应推 error 事件并断流（前端转圈必然停止）。"""
+    base, _ = http_server
+    import graph as graph_mod
+    import server as server_mod
+
+    monkeypatch.setattr(server_mod, "SSE_IDLE_TIMEOUT", 1)
+
+    def _hanging_stream(question, mode=None, thread_id=None):
+        import time
+        while True:  # 模拟模型/工具挂起：永不产出事件
+            time.sleep(0.5)
+
+    monkeypatch.setattr(graph_mod, "ask_stream", _hanging_stream)
+    status, body = _sse_post(base, "挂起测试")
+    assert status == 200
+    assert "响应超时" in body, f"应收到超时 error 事件: {body[:200]}"
+
+
 # ---------- 来源提取（sources） ----------
 
 def test_build_sources_document():
@@ -870,8 +925,13 @@ def test_delete_session_removes_thread(monkeypatch, tmp_path):
 # ---------- 流式（ask_stream 事件结构） ----------
 
 def test_ask_stream_yields_start_then_done(monkeypatch, tmp_path):
-    """ask_stream 应 yield start 事件并以 done 事件结束（含 sources）。"""
+    """ask_stream 应 yield start 事件并以 done 事件结束（含 sources）。
+
+    用真实的 AIMessageChunk/ToolMessageChunk 模拟流（isinstance 判断），
+    覆盖 create_agent（节点名 "model"）的真实流式行为。
+    """
     import graph as graph_mod
+    from langchain_core.messages import AIMessageChunk, ToolMessage
 
     class FakeAgent:
         def __init__(self):
@@ -879,17 +939,14 @@ def test_ask_stream_yields_start_then_done(monkeypatch, tmp_path):
 
         def stream(self, *args, **kwargs):
             # 模拟 LangGraph 双流模式：("messages", (chunk, meta)) 与 ("updates", {...})
-            class Chunk:
-                def __init__(self, content="", tccs=None):
-                    self.content = content
-                    self.tool_call_chunks = tccs or []
-
-            # messages 流：token 增量
-            yield ("messages", (Chunk("你好"), {"langgraph_node": "agent"}))
-            yield ("messages", (Chunk("，我是"), {"langgraph_node": "agent"}))
-            yield ("messages", (Chunk("Pray"), {"langgraph_node": "agent"}))
+            # messages 流：token 增量（真实 create_agent 的节点名为 "model"）
+            yield ("messages", (AIMessageChunk(content="你好"), {"langgraph_node": "model"}))
+            yield ("messages", (AIMessageChunk(content="，我是"), {"langgraph_node": "model"}))
+            yield ("messages", (AIMessageChunk(content="Pray"), {"langgraph_node": "model"}))
+            # 工具结果消息（tools 节点，真实 create_agent 输出完整 ToolMessage）
+            yield ("messages", (ToolMessage(content="检索结果片段", tool_call_id="c1"), {"langgraph_node": "tools"}))
             # updates 流：完整消息（供 usage/tool_calls 提取）
-            yield ("updates", {"agent": {"messages": [{"type": "ai", "content": "你好，我是Pray"}]}})
+            yield ("updates", {"model": {"messages": [{"type": "ai", "content": "你好，我是Pray"}]}})
 
         def get_state(self, config):
             class State:
@@ -914,6 +971,8 @@ def test_ask_stream_yields_start_then_done(monkeypatch, tmp_path):
     assert types[-1] == "done"
     tokens = "".join(e.get("content", "") for e in events if e["type"] == "token")
     assert tokens == "你好，我是Pray"
+    tool_dones = [e for e in events if e["type"] == "tool_done"]
+    assert tool_dones and "检索结果片段" in tool_dones[0]["result"]
     done = events[-1]
     assert "reflection" in done and "sources" in done
     assert done["usage"] == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
@@ -1360,6 +1419,96 @@ def test_open_in_browser_rejects_escape_and_missing(monkeypatch, tmp_path):
     assert "拒绝" in r1
     r2 = open_in_browser.invoke({"file_path": "nope.html"})
     assert "不存在" in r2
+
+
+# ---------- fetch_url 工具（GitHub 白名单只读抓取） ----------
+
+def test_fetch_url_rejects_non_whitelisted(monkeypatch):
+    """非白名单域名 / 非 http(s) 协议应拒绝，且不发网络请求。"""
+    import tools as tools_mod
+
+    def _boom(url, timeout=15):
+        raise AssertionError(f"不应发起网络请求: {url}")
+
+    monkeypatch.setattr(tools_mod, "_http_get", _boom)
+    from tools import fetch_url
+
+    assert "白名单" in fetch_url.invoke({"url": "http://evil.com/steal"})
+    assert "白名单" in fetch_url.invoke({"url": "https://attacker.io/x"})
+    assert "http" in fetch_url.invoke({"url": "file:///etc/passwd"})
+    assert "http" in fetch_url.invoke({"url": "ftp://github.com/x"})
+    # 子域名/相似域名不得放行（精确 hostname 匹配）
+    assert "白名单" in fetch_url.invoke({"url": "https://github.com.evil.com/repo"})
+
+
+def test_fetch_url_github_repo_reads_readme(monkeypatch):
+    """仓库根 URL 应自动抓 raw README（HEAD 分支），而非仓库主页 HTML。"""
+    import tools as tools_mod
+
+    calls: list[str] = []
+
+    def _fake_get(url, timeout=15):
+        calls.append(url)
+        if "raw.githubusercontent.com" in url:
+            return url, "# Pray\n\n一个 LangGraph 通用 Agent 项目。".encode("utf-8")
+        return url, "<html><body>仓库主页</body></html>".encode("utf-8")
+
+    monkeypatch.setattr(tools_mod, "_http_get", _fake_get)
+    from tools import fetch_url
+
+    r = fetch_url.invoke({"url": "https://github.com/pray0411/langgraph-doc-agent"})
+    assert "README" in r and "LangGraph 通用 Agent" in r
+    assert calls and "raw.githubusercontent.com/pray0411/langgraph-doc-agent/HEAD/README.md" in calls[0]
+
+
+def test_fetch_url_readme_missing_falls_back_to_page(monkeypatch):
+    """README 抓取失败（404）应退回仓库主页 HTML 提取文本。"""
+    import tools as tools_mod
+
+    class HTTP404(Exception):
+        pass
+
+    def _fake_get(url, timeout=15):
+        if "raw.githubusercontent.com" in url:
+            raise HTTP404("404 Not Found")
+        return url, "<html><head><script>var x=1;</script><style>.a{}</style></head><body><h1>仓库名</h1><p>这是仓库说明。</p></body></html>".encode("utf-8")
+
+    monkeypatch.setattr(tools_mod, "_http_get", _fake_get)
+    from tools import fetch_url
+
+    r = fetch_url.invoke({"url": "https://github.com/pray0411/langgraph-doc-agent"})
+    assert "仓库名" in r and "这是仓库说明" in r
+    assert "script" not in r and "var x" not in r  # 脚本已剔除
+
+
+def test_fetch_url_api_github_returns_json(monkeypatch):
+    """api.github.com 应原样返回 JSON 元数据（模型可直接读）。"""
+    import tools as tools_mod
+
+    def _fake_get(url, timeout=15):
+        return url, b'{"full_name": "pray0411/langgraph-doc-agent", "stargazers_count": 42}'
+
+    monkeypatch.setattr(tools_mod, "_http_get", _fake_get)
+    from tools import fetch_url
+
+    r = fetch_url.invoke({"url": "https://api.github.com/repos/pray0411/langgraph-doc-agent"})
+    assert "stargazers_count" in r and "42" in r
+
+
+def test_fetch_url_text_cap(monkeypatch):
+    """超长内容应截断到 _FETCH_MAX_TEXT，防撑爆上下文。"""
+    import tools as tools_mod
+    monkeypatch.setattr(tools_mod, "_FETCH_MAX_TEXT", 50)
+
+    def _fake_get(url, timeout=15):
+        return url, ("长" * 200).encode("utf-8")
+
+    monkeypatch.setattr(tools_mod, "_http_get", _fake_get)
+    from tools import fetch_url
+
+    r = fetch_url.invoke({"url": "https://raw.githubusercontent.com/a/b/main/x.md"})
+    content = r.split("\n", 1)[1] if "\n" in r else r
+    assert len(content) <= 50, f"正文应截断到 50 字符: {len(content)}"
 
 
 # ---------- Codex 评审修复验证 ----------

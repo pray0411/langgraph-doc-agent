@@ -19,6 +19,7 @@ import uuid
 from typing import TypedDict
 
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.messages import AIMessageChunk, ToolMessage, ToolMessageChunk
 from langchain_openai import ChatOpenAI
 # Agent 构建：langchain 统一包提供 create_agent（替代 langgraph.prebuilt 的
 # create_react_agent——后者自 LangGraph V1.0 起弃用、V2.0 将移除）。
@@ -28,7 +29,15 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from config import LLM_MODEL, LLM_PROVIDER, MEMORY_DB
 from prompts import SYSTEM_PROMPT
-from tools import get_weather, open_in_browser, run_command, search_documents, web_search, write_file
+from tools import (
+    fetch_url,
+    get_weather,
+    open_in_browser,
+    run_command,
+    search_documents,
+    web_search,
+    write_file,
+)
 
 
 class AgentResult(TypedDict, total=False):
@@ -197,7 +206,10 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
 
     agent = create_agent(
         model=model,
-        tools=[search_documents, web_search, get_weather, write_file, run_command, open_in_browser],
+        tools=[
+            search_documents, web_search, get_weather,
+            write_file, run_command, open_in_browser, fetch_url,
+        ],
         checkpointer=memory or get_memory(),
         # 系统提示：行为准则集中管理在 prompts.py（与工具 docstring 协同）
         system_prompt=SYSTEM_PROMPT,
@@ -345,20 +357,27 @@ def ask_stream(
                 mode_name, inner = item
                 if mode_name == "messages":
                     msg_chunk, metadata = inner
-                    node = (metadata or {}).get("langgraph_node", "")
-                    if node == "agent":
+                    # 用 isinstance 判断消息类型（不依赖节点名，也不依赖 type 字符串）：
+                    # create_react_agent 模型节点叫 "agent"、create_agent 叫 "model"，
+                    # 流式 chunk 的 type 属性是 "AIMessageChunk"（而非 "ai"）——
+                    # 字符串匹配极易随版本漂移，isinstance 最稳。
+                    if isinstance(msg_chunk, AIMessageChunk):
+                        # 模型输出：文字 token 增量 + 工具调用开始
                         content = getattr(msg_chunk, "content", None)
                         if isinstance(content, str) and content:
                             text_parts.append(content)
                             yield {"type": "token", "content": content}
-                        # 工具调用开始（tool_call_chunks 出现在 agent 的 AIMessage 增量里）
+                        # 工具调用开始（tool_call_chunks 出现在模型输出的 AIMessage 增量里）
                         for tcc in getattr(msg_chunk, "tool_call_chunks", None) or []:
                             name = tcc.get("name")
                             if name and name not in seen_tools:
                                 seen_tools.add(name)
                                 yield {"type": "tool_start", "name": name}
-                    elif node == "tools":
-                        # 工具结果消息（ToolMessage）——回传摘要供前端展示
+                    elif isinstance(msg_chunk, (ToolMessage, ToolMessageChunk)):
+                        # 工具结果消息——回传摘要供前端展示（注意：create_agent 的
+                        # tools 节点在 messages 流里输出的是完整 ToolMessage 而非
+                        # ToolMessageChunk，两类都要匹配，否则 tool_done 丢失会
+                        # 连带破坏前端的高危命令确认弹窗）
                         content = getattr(msg_chunk, "content", None)
                         if isinstance(content, str) and content:
                             yield {"type": "tool_done", "result": content[:200]}

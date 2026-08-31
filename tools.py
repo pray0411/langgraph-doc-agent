@@ -7,6 +7,8 @@
 """
 from pathlib import Path
 
+import urllib.request
+
 from langchain_core.tools import tool
 
 from config import BOCHA_API_KEY, TOP_K
@@ -339,3 +341,142 @@ def open_in_browser(file_path: str) -> str:
         return f"已在浏览器/默认程序中打开 {target.relative_to(write_root)}"
     except Exception as exc:  # noqa: BLE001
         return f"打开失败: {exc}"
+
+
+# ---------- fetch_url：只读抓取（GitHub 域名白名单） ----------
+
+# 白名单：仅允许 GitHub 相关域名。逐跳校验（重定向也会重新检查），
+# 杜绝"看似 github 域名、实际跳到站外"的绕过。
+_FETCH_ALLOWED_HOSTS = {
+    "github.com",
+    "api.github.com",
+    "raw.githubusercontent.com",
+}
+_FETCH_TIMEOUT = 15          # 秒
+_FETCH_MAX_BYTES = 200_000   # 响应体上限（防超大响应拖垮内存）
+_FETCH_MAX_TEXT = 6000       # 返回给模型的文本上限（字符，防撑爆上下文）
+_USER_AGENT = "Pray-DocAgent/1.0 (read-only fetch)"
+
+
+def _check_fetch_url(url: str) -> str:
+    """校验 URL 协议与域名白名单，返回 hostname；不合法抛 ValueError。"""
+    from urllib.parse import urlsplit
+
+    if not url or len(url) > 2000:
+        raise ValueError("URL 为空或过长")
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise ValueError("仅支持 http/https 协议")
+    host = (parts.hostname or "").lower()
+    if host not in _FETCH_ALLOWED_HOSTS:
+        raise ValueError(f"域名 {host} 不在白名单（仅允许 GitHub 相关域名）")
+    return host
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):  # noqa: N801
+    """不自动跟随重定向：由 _http_get 逐跳手动校验域名白名单。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+        return None
+
+
+def _http_get(url: str, timeout: float = _FETCH_TIMEOUT) -> tuple[str, bytes]:
+    """逐跳 GET（每跳校验白名单），返回 (最终URL, 原始字节)。"""
+    import urllib.error
+    import urllib.request
+    from urllib.parse import urljoin
+
+    current = url
+    opener = urllib.request.build_opener(_NoRedirect)
+    for _ in range(6):
+        _check_fetch_url(current)  # 每跳重新校验域名
+        req = urllib.request.Request(
+            current,
+            headers={"User-Agent": _USER_AGENT, "Accept": "text/html,application/json,*/*"},
+        )
+        try:
+            resp = opener.open(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (301, 302, 303, 307, 308) and exc.headers.get("Location"):
+                current = urljoin(current, exc.headers["Location"])
+                continue
+            raise
+        data = resp.read(_FETCH_MAX_BYTES + 1)
+        return resp.geturl(), data
+    raise ValueError("重定向次数过多")
+
+
+def _html_to_text(html: str) -> str:
+    """粗略提取 HTML 文本：去脚本/样式/标签/注释，压缩空白。"""
+    import html as _html
+    import re as _re
+
+    text = _re.sub(r"(?is)<script.*?</script>", " ", html)
+    text = _re.sub(r"(?is)<style.*?</style>", " ", text)
+    text = _re.sub(r"(?is)<!--.*?-->", " ", text)
+    text = _re.sub(r"(?is)<[^>]+>", " ", text)
+    text = _html.unescape(text)
+    text = _re.sub(r"[ \t]+", " ", text)
+    text = _re.sub(r"\n\s*\n+", "\n", text)
+    return text.strip()
+
+
+def _github_repo_path(url: str) -> tuple[str, str] | None:
+    """识别 GitHub 仓库根 URL（https://github.com/<owner>/<repo>[/]），返回 (owner, repo)。"""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if parts.hostname != "github.com":
+        return None
+    segs = [s for s in parts.path.split("/") if s]
+    if len(segs) == 2:
+        return segs[0], segs[1]
+    return None
+
+
+@tool
+def fetch_url(url: str) -> str:
+    """只读获取网页/接口内容（GitHub 域名白名单）。
+
+    当需要**查看某个 GitHub 仓库的真实内容**（锐评项目、了解其 README/代码、
+    核对接口返回）时调用——web_search 只能搜到页面标题摘要，拿不到仓库正文。
+    - 仓库根 URL（https://github.com/<owner>/<repo>）自动抓取 README
+    - https://api.github.com/repos/<owner>/<repo> 返回仓库元数据 JSON
+      （star 数/语言/描述/更新时间等）
+    - 其余 github.com / raw.githubusercontent.com 页面按文本提取返回
+
+    只读安全设计：仅允许 GitHub 相关域名（github.com / api.github.com /
+    raw.githubusercontent.com），仅 GET、不执行任何代码、重定向逐跳校验域名
+    白名单、响应大小上限。**不要**用它抓取其他网站，也不要改用
+    run_command + curl（curl 命中高危规则需用户确认，且无白名单保护）。
+
+    Args:
+        url: 要读取的完整 URL（http/https）
+    """
+    try:
+        host = _check_fetch_url(url)
+        repo = _github_repo_path(url)
+        if repo:
+            # 仓库根 URL：优先抓 README（raw.githubusercontent 的 HEAD 分支），失败退回仓库主页
+            owner, name = repo
+            for readme in ("README.md", "readme.md", "Readme.md"):
+                try:
+                    raw_url = f"https://raw.githubusercontent.com/{owner}/{name}/HEAD/{readme}"
+                    final_url, data = _http_get(raw_url)
+                    text = data.decode("utf-8", errors="replace")
+                    if text.strip():
+                        return f"README（{final_url}）：\n" + text.strip()[:_FETCH_MAX_TEXT]
+                except Exception:  # noqa: BLE001
+                    continue
+            final_url, data = _http_get(url)
+            text = _html_to_text(data.decode("utf-8", errors="replace"))
+        else:
+            final_url, data = _http_get(url)
+            raw = data.decode("utf-8", errors="replace")
+            # api.github.com 返回 JSON（模型可直接读）；HTML 页面转纯文本
+            text = raw if host == "api.github.com" else _html_to_text(raw)
+        if not text.strip():
+            return f"抓取成功但内容为空（{final_url}）"
+        return f"内容（{final_url}）：\n" + text.strip()[:_FETCH_MAX_TEXT]
+    except Exception as exc:  # noqa: BLE001
+        return f"抓取失败: {exc}"
