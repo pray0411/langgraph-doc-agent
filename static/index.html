@@ -151,6 +151,23 @@
   .md strong { font-weight: 700; }
   .md em { font-style: italic; }
 
+  /* 代码块：默认折叠（details），点开才显示完整代码 */
+  .code-block { margin: 8px 0; border: 1px solid var(--border); border-radius: 10px; background: var(--code-bg); overflow: hidden; }
+  .code-block summary { display: flex; align-items: center; gap: 10px; padding: 9px 14px; cursor: pointer; user-select: none; list-style: none; font-size: 12.5px; color: var(--text); transition: background .15s; }
+  .code-block summary::-webkit-details-marker { display: none; }
+  .code-block summary:hover { background: var(--bg-hover); }
+  .code-block summary::before { content: '▸'; transition: transform .15s; color: var(--text-dim); font-size: 13px; }
+  .code-block[open] summary::before { transform: rotate(90deg); }
+  .code-block[open] summary { border-bottom: 1px solid var(--border); }
+  .cb-lang { font-weight: 600; color: var(--accent); font-family: Consolas, monospace; }
+  .cb-meta { color: var(--text-dim); }
+  .cb-toggle { margin-left: auto; color: var(--text-dim); }
+  .code-block[open] .cb-toggle::after { content: '收起'; }
+  .code-block:not([open]) .cb-toggle::after { content: '点击展开'; }
+  .code-block pre { border-radius: 0 0 10px 10px; margin: 0; }
+  .code-block[open] pre { display: block; }
+  .code-block:not([open]) pre { display: none; }
+
   /* 代码块复制按钮 */
   .code-copy { position: absolute; top: 6px; right: 6px; border: 1px solid var(--border); background: var(--bg-input); color: var(--text-dim); font-size: 11px; padding: 3px 8px; border-radius: 6px; cursor: pointer; opacity: 0; transition: opacity .15s; }
   .md pre:hover .code-copy { opacity: 1; }
@@ -436,8 +453,10 @@ function renderInline(text) {
 function renderCodeBlock(code, lang) {
   const id = 'code-' + Math.random().toString(36).slice(2, 8);
   const safe = esc(code);
+  const lineCount = code.split('\n').length;
+  const langLabel = (lang || 'code').toLowerCase();
   // HTML 代码块（含 <html>/<!DOCTYPE> 或 lang 含 html）→ 显示『▶ 运行』按钮
-  const isHtml = (lang || '').toLowerCase().includes('html')
+  const isHtml = langLabel.includes('html')
     || /<!doctype|<html[\s>]|<script[\s>]/i.test(code);
   let runBtn = '';
   if (isHtml) {
@@ -446,9 +465,15 @@ function renderCodeBlock(code, lang) {
     // 其他语言（python 等）：提示不可在浏览器直接运行
     runBtn = '<span class="code-run-hint" title="浏览器无法直接运行 ' + esc(lang) + '，如需可玩版本请让 AI 用 HTML 写">' + esc(lang) + ' ⚠</span>';
   }
-  return '<pre><code>' + safe + '</code>' +
+  // 默认折叠：摘要行显示语言/行数/展开提示，点开才显示完整代码（details 元素）
+  return '<details class="code-block">' +
+    '<summary><span class="cb-lang">' + esc(langLabel) + '</span>' +
+    '<span class="cb-meta">' + lineCount + ' 行</span>' +
+    '<span class="cb-toggle">点击展开</span></summary>' +
+    '<pre><code>' + safe + '</code>' +
     '<button class="code-copy" data-target="' + id + '">复制</button>' +
-    runBtn + '</pre>';
+    runBtn + '</pre>' +
+    '</details>';
 }
 
 function renderMarkdown(md) {
