@@ -1095,15 +1095,22 @@ async function ask() {
     flushRender();
     if (!answer) bubble.textContent = '（无回答）';
 
-    // 高危命令待确认：弹窗询问用户，确认后自动续问执行
+    // 高危命令待确认：弹窗询问用户，确认后登记批准并续问执行
     if (pendingConfirm) {
       const cmd = pendingConfirm.command;
       const allow = confirm('⚠️ AI 想执行高危命令：\n\n' + cmd + '\n\n是否允许执行？');
       if (allow) {
-        // 用户确认：追加一条"确认执行"消息，重新触发流式问答（AI 会用 confirmed=True 重试）
+        // 1. 后端登记批准（run_command 校验 confirmed=True 时必须命中此记录）
+        try {
+          await fetch('/api/approve', {
+            method: 'POST',
+            headers: authHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
+            body: 'command=' + encodeURIComponent(cmd)
+          });
+        } catch (e) { /* 登记失败则继续，服务端会拒绝未登记的执行 */ }
+        // 2. 追加"确认执行"消息，重新触发流式问答
         addMessage('user', '✅ 已确认执行命令：' + cmd);
-        // 复用当前 thread_id 续问
-        const q = '请继续执行命令：' + cmd + '（用户已确认，直接用 confirmed=True 调用 run_command）';
+        const q = '请继续执行命令：' + cmd + '（用户已确认）';
         input.value = q;
         ask();
         return;  // 让新的 ask() 接管渲染

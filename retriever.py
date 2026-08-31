@@ -115,10 +115,13 @@ def _split_by_paragraph(text: str, chunk_size: int, overlap: int) -> list[str]:
         if len(buffer) + len(para) + 1 <= chunk_size:
             buffer = f"{buffer}\n{para}".strip()
             continue
+        # 当前 buffer 已满（非空）先收尾
         if buffer:
             chunks.append(buffer)
-            buffer = para
-        # 段落本身过长时滑动切分
+            buffer = ""
+        # 段落本身过长（可能 > chunk_size）：先整体入 buffer，再滑动切分
+        # （修复：此前 buffer 为空时段落被直接丢弃，导致长段落内容丢失）
+        buffer = para
         while len(buffer) > chunk_size:
             chunks.append(buffer[:chunk_size])
             buffer = buffer[chunk_size - overlap:]

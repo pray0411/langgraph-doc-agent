@@ -68,31 +68,53 @@ _agent_cache_lock = threading.Lock()
 
 
 class _UsageCapture(BaseCallbackHandler):
-    """LangChain 回调：在 on_llm_end 捕获本次调用的 token 用量。
+    """LangChain 回调：在 on_llm_end 捕获 token 用量，按会话（thread_id）累计。
 
     LangGraph 的 stream 模式会剥离 response_metadata 中的 usage（updates 流
     与 checkpoint 都不含），但 on_llm_end 回调能拿到完整 llm_output——这是
     流式路径下获取 token 用量的唯一可靠途径。
+
+    由于 agent 按 provider 缓存、多线程共享同一 handler，用 thread_id 区分
+    会话：每次调用的 usage 累加到对应会话，避免跨请求串值；单次读后即取
+    （ask/ask_stream 结束时通过 _usage_of 读取该会话的累计值）。
     """
 
     def __init__(self):
-        self.usage: dict | None = None
+        self._by_thread: dict[str, dict] = {}
+        self._lock = threading.Lock()
+        # 当前线程正在服务的 thread_id（ask/ask_stream 调用前设置，
+        # 回调在同一线程执行，可直接读取；比从 callback metadata 取更可靠）
+        self._thread_local = threading.local()
+
+    def set_current_thread(self, thread_id: str) -> None:
+        self._thread_local.thread_id = thread_id
 
     def on_llm_end(self, response, **kwargs) -> None:  # noqa: N802
         llm_output = getattr(response, "llm_output", None) or {}
         usage = llm_output.get("token_usage") or llm_output.get("usage") or {}
-        if isinstance(usage, dict) and usage.get("total_tokens"):
-            self.usage = {
-                "prompt_tokens": usage.get("prompt_tokens", 0),
-                "completion_tokens": usage.get("completion_tokens", 0),
-                "total_tokens": usage.get("total_tokens", 0),
-            }
+        if not (isinstance(usage, dict) and usage.get("total_tokens")):
+            return
+        thread_id = getattr(self._thread_local, "thread_id", "default")
+        with self._lock:
+            acc = self._by_thread.setdefault(thread_id, {
+                "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+            })
+            acc["prompt_tokens"] += usage.get("prompt_tokens", 0)
+            acc["completion_tokens"] += usage.get("completion_tokens", 0)
+            acc["total_tokens"] += usage.get("total_tokens", 0)
+
+    def get(self, thread_id: str) -> dict | None:
+        with self._lock:
+            acc = self._by_thread.get(thread_id or "default")
+            if acc is None:
+                return None
+            return dict(acc)
 
 
-def _usage_of(agent) -> dict | None:
-    """从 agent 上取最近一次调用的 token 用量（经 on_llm_end 回调捕获）。"""
+def _usage_of(agent, thread_id: str = "") -> dict | None:
+    """从 agent 上取指定会话的累计 token 用量。"""
     handler = getattr(agent, "__usage_handler", None)
-    return getattr(handler, "usage", None) if handler else None
+    return handler.get(thread_id) if handler else None
 
 
 def _estimate_tokens_from_text(text: str) -> int:
@@ -189,6 +211,11 @@ def ask(
     """
     agent = build_agent(mode)
 
+    # 标记当前线程的会话（usage 回调按此累计，防跨请求串值）
+    handler = getattr(agent, "__usage_handler", None)
+    if handler is not None:
+        handler.set_current_thread(thread_id or "default")
+
     # 组装消息：历史 + 当前问题（无 thread_id 时才需要手动拼历史）
     messages_in = []
     if history and not thread_id:
@@ -233,7 +260,7 @@ def ask(
     if show_log:
         for line in log:
             print(line)
-    usage = _usage_of(agent)
+    usage = _usage_of(agent, thread_id)
     return answer, {
         "answer": answer,
         "messages": log,
@@ -273,6 +300,11 @@ def ask_stream(
         temp_thread = f"temp-{uuid.uuid4().hex}"
         thread_id = temp_thread
     config = {"configurable": {"thread_id": thread_id}}
+
+    # 标记当前线程的会话（usage 回调按此累计，防跨请求串值）
+    handler = getattr(agent, "__usage_handler", None)
+    if handler is not None:
+        handler.set_current_thread(thread_id)
 
     yield {"type": "start", "mode": mode or LLM_PROVIDER}
 
@@ -325,7 +357,7 @@ def ask_stream(
     reflection = _build_reflection(question, answer, tool_calls, mode or LLM_PROVIDER)
     # 用量：优先回调精确值（非流式 invoke 路径）；流式路径 deepseek 不返回 usage，
     # 降级为按文本长度估算并标注 estimated
-    usage = _usage_of(agent)
+    usage = _usage_of(agent, thread_id)
     estimated = False
     if usage is None and answer:
         total = _estimate_tokens_from_text(answer)

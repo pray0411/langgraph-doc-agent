@@ -197,6 +197,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._handle_run_write()
             return
+        if self.path == "/api/approve":
+            if not self._auth_required():
+                return
+            self._handle_approve()
+            return
         self.send_error(404)
 
     def _handle_set_mode(self):
@@ -448,6 +453,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "path": str(target)})
         except OSError as exc:
             self._json({"error": f"写入失败: {exc}"}, 500)
+
+    def _handle_approve(self):
+        """登记用户对高危命令的批准（前端确认弹窗后调用）。"""
+        import approvals
+
+        data = self._read_form()
+        command = (data.get("command") or [""])[0].strip()
+        if not command:
+            self._json({"error": "缺少 command"}, 400)
+            return
+        approvals.approve(command)
+        self._json({"ok": True, "command": command})
 
     def _json(self, obj, code=200):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")

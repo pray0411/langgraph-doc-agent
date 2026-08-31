@@ -213,8 +213,10 @@ def run_command(command: str, input_text: str = "", confirmed: bool = False) -> 
 
     安全机制：
     - 破坏性命令（rm -rf /、format、shutdown 等）直接拒绝
-    - 高危命令（删除/移动/安装包/联网下载等）需要 confirmed=True 才会执行；
-      未确认时返回 NEED_CONFIRM 标记，由用户在界面确认后再次调用
+    - 高危命令（删除/移动/安装包/联网下载等）必须**用户在前端确认**后才执行：
+      首次调用返回 NEED_CONFIRM，用户确认后系统会自动续问；届时再以
+      confirmed=True 调用。**不要自己把 confirmed 设为 True**——未经用户
+      确认的 confirmed=True 会被后端拒绝（无批准记录）。
     - 30 秒超时自动终止；输出截断到 2000 字符
 
     Args:
@@ -237,11 +239,21 @@ def run_command(command: str, input_text: str = "", confirmed: bool = False) -> 
 
     # 2. 高危命令需要确认
     is_high_risk = any(re.search(p, command, re.IGNORECASE) for p in _HIGH_RISK_PATTERNS)
-    if is_high_risk and not confirmed:
-        return (
-            "NEED_CONFIRM 需要用户确认：高危命令 "
-            f"[{command}] 是否执行？确认后请用 confirmed=True 重新调用本工具。"
-        )
+    if is_high_risk:
+        if not confirmed:
+            return (
+                "NEED_CONFIRM 需要用户确认：高危命令 "
+                f"[{command}] 是否执行？请等待用户确认。"
+            )
+        # confirmed=True 必须命中后端批准登记（用户在前端确认后经 /api/approve 登记）
+        # ——防止模型自填参数绕过授权。批准一次性消费，仅对当前命令有效。
+        from approvals import is_approved
+
+        if not is_approved(command):
+            return (
+                "NEED_CONFIRM 未获用户批准：高危命令 "
+                f"[{command}] 没有对应的批准记录。请等待用户在前端确认。"
+            )
 
     # 3. 执行（沙箱目录 + 超时 + 截断 + 标准输入）
     import os

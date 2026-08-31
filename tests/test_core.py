@@ -690,7 +690,12 @@ def test_ask_stream_yields_start_then_done(monkeypatch, tmp_path):
     fake = FakeAgent()
     # 外部动态赋值（避免类内 __ 名称改写），模拟真实 build_agent 挂 handler
     class Handler:
-        usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        def __init__(self):
+            self._store = {}
+        def set_current_thread(self, tid):
+            pass
+        def get(self, tid):
+            return {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
     fake.__usage_handler = Handler()
     monkeypatch.setattr(graph_mod, "build_agent", lambda mode=None, memory=None: fake)
 
@@ -1124,3 +1129,84 @@ def test_open_in_browser_rejects_escape_and_missing(monkeypatch, tmp_path):
     assert "拒绝" in r1
     r2 = open_in_browser.invoke({"file_path": "nope.html"})
     assert "不存在" in r2
+
+
+# ---------- Codex 评审修复验证 ----------
+
+def test_split_long_paragraph_no_content_loss():
+    """长段落（>chunk_size）切分不应丢内容（Codex 指出的 bug）。"""
+    from retriever import split_text
+
+    r = split_text("A" * 600, chunk_size=500, overlap=100)
+    assert len(r) == 2, f"应切出 2 段，实际 {len(r)}"
+    assert sum(len(c) for c in r) >= 600, "内容不应丢失"
+
+    # 混合：短段 + 超长段
+    r2 = split_text("段一\n\n" + "B" * 800, chunk_size=500, overlap=100)
+    total = sum(len(c) for c in r2)
+    assert total >= 802, f"混合内容不应丢失: {total}"
+
+
+def test_run_command_high_risk_requires_real_approval(monkeypatch, tmp_path):
+    """高危命令 confirmed=True 但无批准记录时应被拒绝（Codex 指出的绕过）。"""
+    import approvals
+    import config as config_mod
+
+    approvals.clear()
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    from tools import run_command
+
+    # 高危命令（move 命中高危模式）但用户未批准 → 拒绝
+    r = run_command.invoke({
+        "command": "move a.txt b.txt",  # 高危（move），无副作用（文件不存在）
+        "confirmed": True,
+    })
+    assert "NEED_CONFIRM" in r, "未批准的高危命令应被拒绝"
+
+
+def test_run_command_approval_flow(monkeypatch, tmp_path):
+    """批准登记后高危命令可执行；批准一次性消费。"""
+    import approvals
+    import config as config_mod
+
+    approvals.clear()
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    from tools import run_command
+
+    cmd = "move a.txt b.txt"  # 高危命令（move），无副作用
+    # 1. 未批准 → 拒绝
+    r1 = run_command.invoke({"command": cmd, "confirmed": True})
+    assert "NEED_CONFIRM" in r1
+    # 2. 用户批准登记
+    approvals.approve(cmd)
+    # 3. 批准后可执行（move 文件不存在会失败，但进入执行分支而非拒绝）
+    r2 = run_command.invoke({"command": cmd, "confirmed": True})
+    assert "执行成功" in r2 or "执行失败" in r2, "批准后应进入执行分支"
+    # 4. 一次性消费：再次执行同一命令需重新批准
+    r3 = run_command.invoke({"command": cmd, "confirmed": True})
+    assert "NEED_CONFIRM" in r3, "批准应一次性消费"
+
+
+def test_usage_capture_accumulates_per_thread():
+    """Token 用量应按会话累计，且跨会话隔离（Codex 指出的覆盖/串值问题）。"""
+    import graph as graph_mod
+
+    h = graph_mod._UsageCapture()
+
+    class FakeResp:
+        def __init__(self, pt, ct):
+            self.llm_output = {"token_usage": {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}}
+
+    # 线程 A 两次调用
+    h.set_current_thread("t1")
+    h.on_llm_end(FakeResp(100, 50))
+    h.on_llm_end(FakeResp(200, 80))
+    # 线程 B 一次调用
+    h.set_current_thread("t2")
+    h.on_llm_end(FakeResp(30, 10))
+
+    u1 = h.get("t1")
+    assert u1["total_tokens"] == 430, f"t1 应累计 430，实际 {u1}"
+    u2 = h.get("t2")
+    assert u2["total_tokens"] == 40, f"t2 应 40，实际 {u2}"
+    assert h.get("nonexistent") is None
