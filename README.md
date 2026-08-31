@@ -74,7 +74,7 @@ python -X utf8 main.py web
    │
    ▼
 ┌─────────────────────────────────────────┐
-│          ReAct Agent（create_react_agent）│
+│          ReAct Agent（langchain create_agent）│
 │                                         │
 │  模型自主循环：                          │
 │    思考(Reason) → 行动(Act/调工具)      │
@@ -171,7 +171,7 @@ python -X utf8 main.py web
 
 ```
 langgraph-doc-agent/
-├── graph.py         # ★ 核心：create_react_agent 通用 Agent + 反思逻辑 + checkpointer 记忆
+├── graph.py         # ★ 核心：langchain create_agent 通用 Agent + 反思逻辑 + checkpointer 记忆
 ├── tools.py         # 工具集：search_documents / web_search / get_weather / write_file / run_command / open_in_browser
 ├── retriever.py     # jieba+BM25 + embedding 语义的 RRF 混合检索
 ├── server.py        # 网页服务（并发安全、请求超时、API Token 鉴权）

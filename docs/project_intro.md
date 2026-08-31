@@ -6,7 +6,7 @@
 
 ## 技术架构
 
-采用 LangGraph 官方最主流的 **ReAct / Tool-calling Agent** 模式（`create_react_agent`），模型在循环内自主决定：
+采用 LangGraph 官方最主流的 **ReAct / Tool-calling Agent** 模式（`langchain.agents.create_agent`，替代已弃用的 `create_react_agent`），模型在循环内自主决定：
 
 1. 文档问题 → 调用 `search_documents` 工具，检索本地文档索引
 2. 实时问题 → 调用 `web_search` / `get_weather` 工具
@@ -21,7 +21,7 @@
 ## 使用的技术栈
 
 - Python 3.10+：项目主要开发语言。
-- LangGraph：`create_react_agent` 通用 Agent 编排 + SQLite checkpointer 多轮记忆。
+- LangGraph：`langchain.agents.create_agent` 通用 Agent 编排 + SQLite checkpointer 多轮记忆。
 - 检索：本地 **jieba 分词 + BM25** 与 **sentence-transformers 语义向量** 的 RRF 混合检索，
   无需外部向量数据库；语义模型不可用时自动回退纯 BM25。
 - 模型：支持 DeepSeek、OpenAI 及多家 OpenAI 兼容服务商，也可接本地 Ollama。
@@ -41,7 +41,7 @@
 
 ## 目录结构
 
-- graph.py：create_react_agent 通用 Agent、checkpointer 记忆与反思逻辑
+- graph.py：create_agent 通用 Agent、checkpointer 记忆与反思逻辑
 - retriever.py：文档加载、切分、jieba 分词、BM25 + 语义向量混合索引与检索
 - tools.py：Agent 工具集（文档检索 / 联网搜索 / 天气）
 - server.py：网页问答服务（并发安全、超时、API Token 鉴权）

@@ -26,7 +26,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 from graph import ask
 
@@ -104,20 +104,38 @@ class Handler(BaseHTTPRequestHandler):
         return self.headers.get("X-API-Token", "") == API_TOKEN
 
     def _csrf_ok(self) -> bool:
-        """CSRF 防护：状态变更请求（POST/DELETE）必须来自本站。
+        """CSRF 防护：状态变更请求（POST/DELETE/PUT/PATCH）必须来自本站。
 
         恶意网页可用 form 表单（simple request，无 CORS 预检）向本机端口
         发请求——若不校验，浏览器会替你调用 /api/run/start 执行任意命令。
-        Origin/Referer 头由浏览器设置且跨站无法伪造：
-        - Origin 存在 → 必须匹配本站（127.0.0.1:8000）
+        Origin 头由浏览器设置且跨站无法伪造。校验规则（精确 hostname 比较，
+        杜绝 `127.0.0.1.evil.com` 这类子串匹配绕过）：
         - Origin 缺失 → 非浏览器客户端（curl/脚本），放行
+        - Origin == "null" → sandboxed iframe/data: 页面，拒绝
+        - Origin hostname == 请求 Host hostname → 同源放行
+          （同源比对天然兼容局域网 IP / 自定义域名访问，不再硬编码回环）
+        - 其余一律拒绝（跨站）
         """
         origin = self.headers.get("Origin", "")
         if not origin:
             return True  # 非浏览器客户端
-        # 仅接受来自本站的请求
-        allowed = ("127.0.0.1", "localhost")
-        return any(f"//{h}" in origin or f"://{h}" in origin for h in allowed)
+        if origin == "null":
+            return False
+        try:
+            origin_host = urlsplit(origin).hostname or ""
+        except ValueError:
+            return False
+        if not origin_host:
+            return False
+        host_header = self.headers.get("Host", "")
+        if host_header:
+            try:
+                host_host = urlsplit("//" + host_header).hostname or ""
+            except ValueError:
+                host_host = ""
+            return host_host == origin_host
+        # 无 Host 头（HTTP/1.0 客户端）：仅放行本机回环来源
+        return origin_host in ("127.0.0.1", "localhost", "::1")
 
     def _auth_required(self) -> bool:
         """校验 token + CSRF；失败时写 401/403 并返回 False。"""

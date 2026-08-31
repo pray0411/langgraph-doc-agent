@@ -104,6 +104,7 @@ def send_input(session_id: str, text: str) -> dict:
     proc = sess["proc"]
     if proc.poll() is not None:
         return {"error": "进程已结束"}
+    sess["last_active"] = time.time()
     try:
         proc.stdin.write(text + "\n")
         proc.stdin.flush()

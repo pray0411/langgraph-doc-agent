@@ -398,8 +398,8 @@ def test_memory_persists_across_asks(monkeypatch, tmp_path):
         def _llm_type(self):
             return "fake"
 
-    from langgraph.prebuilt import create_react_agent
-    agent = create_react_agent(model=FakeModel(), tools=[], checkpointer=saver)
+    from langchain.agents import create_agent
+    agent = create_agent(model=FakeModel(), tools=[], checkpointer=saver)
 
     r1 = agent.invoke({"messages": [{"role": "user", "content": "第一问"}]},
                       config={"configurable": {"thread_id": "t1"}})
@@ -412,6 +412,122 @@ def test_memory_persists_across_asks(monkeypatch, tmp_path):
     r3 = agent.invoke({"messages": [{"role": "user", "content": "新会话"}]},
                       config={"configurable": {"thread_id": "t2"}})
     assert "用户已提问 1 次" in r3["messages"][-1].content
+
+
+def test_checkpointer_concurrent_no_database_locked(monkeypatch, tmp_path):
+    """并发 invoke + 会话列表读写不应触发 database is locked（Codex 三轮遗留点）。
+
+    SqliteSaver 内部 cursor() 已持锁串行化每条 SQL 事务；显式会话操作
+    （list_sessions 等）再套 _memory_access_lock 覆盖多步读取。此处用真实
+    agent 并发压测验证两条路径交错时连接不出错。
+    """
+    monkeypatch.setenv("MEMORY_DB", str(tmp_path / "mem_conc.sqlite"))
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    import sqlite3
+    import graph as graph_mod
+
+    conn = sqlite3.connect(tmp_path / "mem_conc.sqlite", check_same_thread=False)
+    saver = SqliteSaver(conn)
+
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    class FakeModel(BaseChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+
+        @property
+        def _llm_type(self):
+            return "fake"
+
+    from langchain.agents import create_agent
+    agent = create_agent(model=FakeModel(), tools=[], checkpointer=saver)
+
+    errors: list[str] = []
+
+    def _worker(n: int):
+        try:
+            for i in range(5):
+                agent.invoke(
+                    {"messages": [{"role": "user", "content": f"线程{n} 第{i}问"}]},
+                    config={"configurable": {"thread_id": f"conc-{n}"}},
+                )
+                # 读写交错：会话列表读取与 checkpoint 写入并发
+                try:
+                    with graph_mod._memory_access_lock:
+                        list(saver.list(None))
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"list: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"invoke: {exc}")
+
+    threads = [threading.Thread(target=_worker, args=(n,)) for n in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert not errors, f"并发下出现异常: {errors}"
+
+    # 全部线程的会话都应落库（4 线程 × 各自 thread_id）
+    threads_ok = {f"conc-{n}" for n in range(4)}
+    got = {t.config["configurable"]["thread_id"] for t in saver.list(None)}
+    assert threads_ok <= got, f"会话应全部持久化: {got}"
+
+
+def test_session_provider_recorded_in_checkpoint_metadata(monkeypatch, tmp_path):
+    """ask 时应把服务商写入 checkpoint metadata，供回放成本按会话当时 provider 估算。"""
+    monkeypatch.setenv("MEMORY_DB", str(tmp_path / "mem_prov.sqlite"))
+    import graph as graph_mod
+    graph_mod._memory = None  # 重置单例，让 get_memory 使用新路径
+
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    import sqlite3
+
+    conn = sqlite3.connect(tmp_path / "mem_prov.sqlite", check_same_thread=False)
+    saver = SqliteSaver(conn)
+
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    class FakeModel(BaseChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+
+        @property
+        def _llm_type(self):
+            return "fake"
+
+    from langchain.agents import create_agent
+    agent = create_agent(model=FakeModel(), tools=[], checkpointer=saver)
+
+    # 用 openai 服务商写入会话（metadata 记录 provider）
+    agent.invoke(
+        {"messages": [{"role": "user", "content": "你好"}]},
+        config={
+            "configurable": {"thread_id": "t-prov"},
+            "metadata": {"provider": "openai"},
+        },
+    )
+
+    # 1) checkpoint metadata 应记录 openai
+    latest = next(t for t in saver.list(None)
+                  if t.config["configurable"]["thread_id"] == "t-prov")
+    assert latest.metadata.get("provider") == "openai", latest.metadata
+
+    # 2) 回放时即使调用方不传 provider，也应按会话当时的 openai 单价估算成本
+    #    （openai output ¥4.8/M 而 deepseek ¥8/M，成本可区分）
+    msgs = graph_mod.get_session_messages("t-prov")
+    assert msgs, "应能读取会话消息"
+    ai = next(m for m in msgs if m["role"] == "assistant")
+    assert ai["cost"] is not None
+    # _estimate_cost 四舍五入到 6 位小数：openai 口径 ≈ 5e-06，deepseek 口径 = 8e-06
+    est_openai = round(ai["usage"]["completion_tokens"] / 1_000_000 * 4.8, 6)
+    est_deepseek = round(ai["usage"]["completion_tokens"] / 1_000_000 * 8.0, 6)
+    assert ai["cost"]["output"] == est_openai, (
+        f"应按会话当时 openai 单价: {ai['cost']}（deepseek 口径应为 {est_deepseek}）"
+    )
 
 
 def test_get_memory_singleton(monkeypatch, tmp_path):
@@ -454,6 +570,51 @@ def test_auth_accepts_correct_token(monkeypatch):
     handler = Handler.__new__(Handler)
     handler.headers = {"X-API-Token": "secret123"}
     assert handler._auth_ok() is True
+
+
+# ---------- CSRF 防护 ----------
+
+def _csrf_handler(headers):
+    """构造带指定请求头的 Handler 实例。"""
+    from server import Handler
+
+    handler = Handler.__new__(Handler)
+    handler.headers = headers
+    return handler
+
+
+def test_csrf_allows_loopback_same_origin():
+    """本机来源（Origin == Host）应放行。"""
+    assert _csrf_handler({"Origin": "http://127.0.0.1:8000", "Host": "127.0.0.1:8000"})._csrf_ok()
+    assert _csrf_handler({"Origin": "http://localhost:8000", "Host": "localhost:8000"})._csrf_ok()
+
+
+def test_csrf_allows_lan_same_origin():
+    """局域网访问（Origin == 局域网 Host）应放行（与 README 的局域网用法一致）。"""
+    assert _csrf_handler({"Origin": "http://192.168.1.5:8000", "Host": "192.168.1.5:8000"})._csrf_ok()
+
+
+def test_csrf_rejects_ip_prefix_domain():
+    """`127.0.0.1.evil.com` 这类子串绕过必须被拒绝（精确 hostname 匹配）。"""
+    assert not _csrf_handler({"Origin": "http://127.0.0.1.evil.com", "Host": "127.0.0.1:8000"})._csrf_ok()
+    assert not _csrf_handler({"Origin": "http://localhost.evil.com", "Host": "localhost:8000"})._csrf_ok()
+    assert not _csrf_handler({"Origin": "https://127.0.0.1.attacker.io", "Host": "127.0.0.1:8000"})._csrf_ok()
+
+
+def test_csrf_rejects_cross_origin():
+    """普通跨站来源应被拒绝。"""
+    assert not _csrf_handler({"Origin": "http://evil.com", "Host": "127.0.0.1:8000"})._csrf_ok()
+
+
+def test_csrf_rejects_null_origin():
+    """sandboxed iframe / data: 页面的 Origin=null 应被拒绝。"""
+    assert not _csrf_handler({"Origin": "null", "Host": "127.0.0.1:8000"})._csrf_ok()
+
+
+def test_csrf_allows_missing_origin():
+    """非浏览器客户端（无 Origin）应放行。"""
+    assert _csrf_handler({"Host": "127.0.0.1:8000"})._csrf_ok()
+    assert _csrf_handler({})._csrf_ok()
 
 
 # ---------- 真实 HTTP 契约测试（起真实 ThreadingHTTPServer） ----------
@@ -543,6 +704,53 @@ def test_http_auth_401_without_token(monkeypatch, tmp_path):
         assert status2 == 200
     finally:
         srv.shutdown()
+
+
+def test_http_csrf_rejects_cross_origin_post(http_server):
+    """真实 HTTP：带跨站 Origin 的 POST 应被 CSRF 拒绝（403）。"""
+    base, _ = http_server
+    data = urllib.parse.urlencode({"mode": "deepseek"}).encode()
+    req = urllib.request.Request(
+        base + "/api/mode", data=data, method="POST",
+        headers={"Origin": "http://evil.com", "Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            assert False, "跨站 POST 不应成功"
+    except urllib.error.HTTPError as e:
+        assert e.code == 403
+        assert "CSRF" in e.read().decode("utf-8")
+
+
+def test_http_csrf_rejects_ip_prefix_domain(http_server):
+    """真实 HTTP：`127.0.0.1.evil.com` Origin 必须 403（防子串绕过）。"""
+    base, _ = http_server
+    data = urllib.parse.urlencode({"mode": "deepseek"}).encode()
+    req = urllib.request.Request(
+        base + "/api/mode", data=data, method="POST",
+        headers={"Origin": "http://127.0.0.1.evil.com", "Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            assert False, "前缀域名 Origin 不应成功"
+    except urllib.error.HTTPError as e:
+        assert e.code == 403
+
+
+def test_http_csrf_allows_same_origin(http_server):
+    """真实 HTTP：与 Host 同源的 POST 应放行。"""
+    base, _ = http_server
+    from urllib.parse import urlparse
+
+    host = urlparse(base).netloc
+    data = urllib.parse.urlencode({"mode": "deepseek"}).encode()
+    req = urllib.request.Request(
+        base + "/api/mode", data=data, method="POST",
+        headers={"Origin": f"http://{host}", "Host": host,
+                 "Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        assert r.status == 200
 
 
 # ---------- 来源提取（sources） ----------
@@ -1059,6 +1267,74 @@ def test_runterm_blocks_destructive(monkeypatch, tmp_path):
 
     r = start("rm -rf /")
     assert "error" in r and "拦截" in r["error"]
+
+
+def test_runterm_high_risk_requires_approval(monkeypatch, tmp_path):
+    """runterm 高危命令未批准时应返回 NEED_CONFIRM（Codex 三轮指出的缺口）。"""
+    import approvals
+    import config as config_mod
+    from runterm import start, stop
+
+    approvals.clear()
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+
+    cmd = "move a.txt b.txt"  # 高危（move），无副作用
+    r1 = start(cmd)
+    assert "NEED_CONFIRM" in r1.get("error", ""), "未批准的高危命令应被拒绝"
+
+    approvals.approve(cmd)
+    r2 = start(cmd)
+    assert "session_id" in r2, "批准后应能启动"
+    stop(r2["session_id"])
+
+
+def test_runterm_sweep_stale_removes_idle(monkeypatch, tmp_path):
+    """sweep_stale 应回收超过闲置超时的会话。"""
+    import config as config_mod
+    import runterm
+
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    runterm._STALE_TIMEOUT = 0  # 立即过期
+
+    r = runterm.start(sys.executable + " -c \"import time; time.sleep(30)\"")
+    assert "session_id" in r
+    sid = r["session_id"]
+
+    # 把 last_active 拨到过去，确保判定过期
+    with runterm._sessions_lock:
+        runterm._sessions[sid]["last_active"] = runterm._STALE_TIMEOUT - 1000
+
+    swept = runterm.sweep_stale()
+    assert swept == 1, f"应清理 1 个会话，实际 {swept}"
+    assert runterm.list_active() == 0
+    runterm._STALE_TIMEOUT = 600
+
+
+def test_runterm_send_input_updates_last_active(monkeypatch, tmp_path):
+    """send_input 应刷新 last_active，防止活跃会话被 sweep 误杀。"""
+    import config as config_mod
+    import runterm
+
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    (tmp_path / "probe.py").write_text(
+        "line = input('>> ').strip()\nprint(f'got: {line}')\n", encoding="utf-8",
+    )
+    r = runterm.start(f'{sys.executable} "{tmp_path / "probe.py"}"')
+    assert "session_id" in r
+    sid = r["session_id"]
+    try:
+        with runterm._sessions_lock:
+            before = runterm._sessions[sid]["last_active"]
+            runterm._sessions[sid]["last_active"] = before - 100  # 模拟长时间未轮询
+        import time
+        time.sleep(0.1)
+        res = runterm.send_input(sid, "ping")
+        assert res.get("ok") is True
+        with runterm._sessions_lock:
+            after = runterm._sessions[sid]["last_active"]
+        assert after > before, "send_input 应刷新 last_active"
+    finally:
+        runterm.stop(sid)
 
 
 # ---------- open_in_browser 工具 ----------

@@ -1,4 +1,4 @@
-"""通用 Agent：基于 LangGraph create_react_agent 构建（ReAct 模式）。
+"""通用 Agent：基于 LangChain create_agent（ReAct/Tool-calling 模式）构建。
 
 核心思想：不再用规则判断"该走哪条路"，而是把工具交给模型，
 由模型自主决定：
@@ -7,7 +7,7 @@
   - 普通对话 -> 直接回答
   - 需要多步 -> 连续调用多个工具（思考 -> 行动 -> 观察 -> 再思考）
 
-这是 LangGraph 最主流的 Agent 架构（ReAct / Tool-calling Agent）。
+这是 LangChain/LangGraph 最主流的 Agent 架构（ReAct / Tool-calling Agent）。
 
 V2 说明：架构从 V1 的"规则路由 + 人工确认 + 反思"演进为 ReAct 通用 Agent，
 人工确认与反思改由模型在循环内自然处理（工具结果即观察）。对外保留 reflection
@@ -20,10 +20,11 @@ from typing import TypedDict
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_openai import ChatOpenAI
-# 注：LangGraph V1.0 起 create_react_agent 弃用并计划迁移到 langchain.agents.create_agent，
-# 但当前 langgraph 1.2.10 中 langgraph.prebuilt 路径仍可用，且无需额外安装 langchain 包。
+# Agent 构建：langchain 统一包提供 create_agent（替代 langgraph.prebuilt 的
+# create_react_agent——后者自 LangGraph V1.0 起弃用、V2.0 将移除）。
+# 迁移要点：prompt= 改名为 system_prompt=；其余参数（model/tools/checkpointer）不变。
+from langchain.agents import create_agent
 from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.prebuilt import create_react_agent
 
 from config import LLM_MODEL, LLM_PROVIDER, MEMORY_DB
 from prompts import SYSTEM_PROMPT
@@ -42,8 +43,12 @@ class AgentResult(TypedDict, total=False):
 # 加锁防并发竞态：ThreadingHTTPServer 多线程首次请求时可能同时初始化。
 _memory = None
 _memory_lock = threading.Lock()
-# SQLite 连接访问锁：单连接被多线程共享（check_same_thread=False），
-# 并发读写 checkpoint 有 database is locked 风险——所有 saver 操作持此锁
+# SQLite 连接访问锁：单连接被多线程共享（check_same_thread=False）。
+# 说明：langgraph 1.2.10 的 SqliteSaver 内部 cursor() 已用 self.lock 串行化
+# 每条 SQL 事务（含 LangGraph 运行期 agent.invoke/stream 的 get_tuple/put/
+# put_writes 与显式 delete_thread），并发 checkpoint 读写不会裸奔；
+# 本锁额外覆盖 list_sessions/get_session_messages 这类"遍历生成器 + 多次
+# 游标操作"的整段读取，保证列表/回放期间不被写入交错截断。
 _memory_access_lock = threading.Lock()
 
 
@@ -63,7 +68,7 @@ def get_memory() -> SqliteSaver:
     return _memory
 
 
-# agent 构建缓存：按 provider 缓存，避免每次提问重建（create_react_agent 有开销）。
+# agent 构建缓存：按 provider 缓存，避免每次提问重建（create_agent 有开销）。
 # 缓存键 = (provider, 运行时配置版本号)——网页端换 Key/模型后版本号变化，自动重建。
 # 缓存值 = agent；usage 回调 handler 挂在 agent.__usage_handler 上随缓存保存。
 _agent_cache: dict[tuple[str, int], object] = {}
@@ -190,12 +195,12 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
             callbacks=[usage_handler],
         )
 
-    agent = create_react_agent(
+    agent = create_agent(
         model=model,
         tools=[search_documents, web_search, get_weather, write_file, run_command, open_in_browser],
         checkpointer=memory or get_memory(),
         # 系统提示：行为准则集中管理在 prompts.py（与工具 docstring 协同）
-        prompt=SYSTEM_PROMPT,
+        system_prompt=SYSTEM_PROMPT,
     )
     # 挂 usage 回调供 _usage_of 读取（随 agent 缓存一起保存）
     agent.__usage_handler = usage_handler  # type: ignore[attr-defined]
@@ -240,9 +245,14 @@ def ask(
     if not thread_id:
         temp_thread = f"temp-{uuid.uuid4().hex}"
         thread_id = temp_thread
+    # metadata 里记录本次会话的服务商：历史回放按"会话当时的 provider"估算成本，
+    # 而不是用回放那一刻的当前 provider（Codex 三轮遗留点）
     result = agent.invoke(
         {"messages": messages_in},
-        config={"configurable": {"thread_id": thread_id}},
+        config={
+            "configurable": {"thread_id": thread_id},
+            "metadata": {"provider": mode or LLM_PROVIDER},
+        },
     )
     if temp_thread:
         delete_session(temp_thread)
@@ -311,7 +321,11 @@ def ask_stream(
     if not thread_id:
         temp_thread = f"temp-{uuid.uuid4().hex}"
         thread_id = temp_thread
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {
+        "configurable": {"thread_id": thread_id},
+        # 记录会话当时的 provider，供历史回放成本估算使用（见 get_session_messages）
+        "metadata": {"provider": mode or LLM_PROVIDER},
+    }
 
     # 标记当前线程的会话（usage 回调按此累计，防跨请求串值）
     handler = getattr(agent, "__usage_handler", None)
@@ -607,8 +621,9 @@ def list_sessions(limit: int = 50) -> list[dict]:
 def get_session_messages(thread_id: str, limit: int = 100, provider: str = "") -> list[dict]:
     """读取指定会话的历史消息（供前端回放）。
 
-    provider: 成本估算用的服务商（默认取当前 LLM_PROVIDER），
-    不再硬编码 deepseek——不同服务商按各自单价估算。
+    provider: 成本估算用的服务商。优先级：会话记录的服务商（ask 时写入
+    checkpoint metadata）> 调用方传入 > 当前 LLM_PROVIDER。这样切换服务商后
+    回放旧会话，成本仍按会话当时的服务商估算，而非回放那一刻的配置。
     从 checkpointer 取该 thread 的最新 checkpoint，提取 human/ai 消息
     （跳过 tool 消息）。中间态 AI 消息（仅 tool_calls 无文本）的工具名
     合并进下一条有文本的 AI 消息；并基于每轮的工具调用结果生成
@@ -626,6 +641,11 @@ def get_session_messages(thread_id: str, limit: int = 100, provider: str = "") -
                 break
     if latest is None:
         return []
+
+    # 会话当时的服务商：ask/ask_stream 写入 checkpoint metadata（优先于
+    # 调用方传入与当前全局配置）
+    session_provider = ((latest.metadata or {}).get("provider") or "").strip()
+    replay_provider = session_provider or provider or LLM_PROVIDER
 
     def _tools_of(m) -> list[dict]:
         """提取 AI 消息的 tool_calls（name+args），兼容 dict 与 BaseMessage。"""
@@ -681,7 +701,7 @@ def get_session_messages(thread_id: str, limit: int = 100, provider: str = "") -
                     # 无工具调用也生成 reflection，保证前端"过程详情"面板始终存在
                     "reflection": _build_reflection(current_question, content, all_tools, "history"),
                     "usage": usage,
-                    "cost": _estimate_cost(provider or LLM_PROVIDER, usage),
+                    "cost": _estimate_cost(replay_provider, usage),
                     "time": session_time,
                 })
                 pending_tools = []

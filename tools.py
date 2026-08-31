@@ -258,6 +258,12 @@ def run_command(command: str, input_text: str = "", confirmed: bool = False) -> 
     # 3. 执行（沙箱目录 + 超时 + 截断 + 标准输入）
     import os
 
+    # 风险说明（Codex 评审记录）：shell=True 把命令交给系统 shell 解析——
+    # 支持管道/通配符/环境变量等便捷语法，但也意味着黑名单正则不是安全边界：
+    # `python -c "..."` 等写法可绕过关键词匹配，真正的人为护栏是上方的高危
+    # 确认闸（approvals 一次性消费）+ 30s 超时强杀 + 限 WRITE_DIR 目录。
+    # 本项目定位单机个人开发辅助，不做沙箱隔离；若用于不受信环境请改为
+    # 非 shell 参数列表执行或容器/虚拟机隔离（见 README 安全边界说明）。
     # 强制子进程 UTF-8 输出：Windows 下 Python 默认 GBK 输出中文，
     # 与 subprocess 的 utf-8 解码不一致会导致乱码
     env = dict(os.environ)
