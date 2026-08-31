@@ -197,6 +197,9 @@
   .typing-bubble { display: inline-flex; align-items: center; gap: 10px; padding: 14px 18px; background: var(--bubble-assistant); border-radius: 16px; border-top-left-radius: 4px; }
   .typing-spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; flex-shrink: 0; vertical-align: middle; }
   .typing-text { display: inline-block; font-size: 13px; color: var(--text-dim); vertical-align: middle; }
+  /* 气泡内：内容区 + 尾部思考指示器（常驻到 done） */
+  .thinking-hint { display: inline-flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; color: var(--text-dim); }
+  .thinking-text { font-size: 13px; color: var(--text-dim); }
 
   .input-area { border-top: 1px solid var(--border); padding: 12px 20px 16px; background: var(--bg); }
   .key-panel { max-width: 820px; margin: 0 auto 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-input); display: none; }
@@ -899,8 +902,13 @@ async function ask() {
 
   const { msg, bubble } = addMessage('assistant', '', { raw: true });
   bubble.classList.add('bubble', 'md');
-  // 思考中：气泡内显示转圈 + 文字（首个 token 到达后由 scheduleRender 覆盖）
-  bubble.innerHTML = '<span class="typing-spinner"></span><span class="typing-text">正在思考…</span>';
+  // 气泡 = 内容区 + 尾部思考指示器（转圈常驻到 done 才移除，
+  // 覆盖"模型思考间隙无数据流"的场景）
+  bubble.innerHTML = '<div class="answer-body"></div>'
+    + '<span class="thinking-hint"><span class="typing-spinner"></span><span class="thinking-text">正在思考…</span></span>';
+  const answerBody = bubble.querySelector('.answer-body');
+  const thinkingHint = bubble.querySelector('.thinking-hint');
+  const thinkingText = bubble.querySelector('.thinking-text');
   let answer = '';
   let sources = [];
   let reflection = '';
@@ -938,7 +946,7 @@ async function ask() {
         renderTimer = null;
         if (renderDirty) {
           renderDirty = false;
-          bubble.innerHTML = renderMarkdown(answer);
+          answerBody.innerHTML = renderMarkdown(answer);
           scrollBottom();
         }
       }, 50);  // 每 50ms 最多重渲染一次
@@ -947,7 +955,7 @@ async function ask() {
       if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
       if (renderDirty || answer) {
         renderDirty = false;
-        bubble.innerHTML = renderMarkdown(answer);
+        answerBody.innerHTML = renderMarkdown(answer);
         scrollBottom();
       }
     }
@@ -962,8 +970,14 @@ async function ask() {
           answer += ev.content;
           scheduleRender();
         } else if (ev.type === 'tool_start') {
-          if (!sawToken) { removeTyping(); addToolStatus(ev.name); toolShown = true; }
+          if (!sawToken) { removeTyping(); }
+          addToolStatus(ev.name);
+          toolShown = true;
+          // 尾部指示器切换为"正在调用工具"
+          if (thinkingText) thinkingText.textContent = '正在调用 ' + ev.name + ' …';
         } else if (ev.type === 'tool_done') {
+          // 工具完成，恢复"正在思考"（模型继续推理下一段回答）
+          if (thinkingText) thinkingText.textContent = '正在思考…';
           // 工具失败信息透传：结果含失败/错误字样时显示警告
           const r = (ev.result || '').trim();
           if (r && /失败|错误|无法|没有搜索|查无|超时|error|fail/i.test(r)) {
@@ -980,6 +994,8 @@ async function ask() {
           if (ev.reflection) reflection = ev.reflection;
           if (ev.usage) { usage = ev.usage; usage.estimated = ev.usage_estimated || false; }
           if (ev.cost) cost = ev.cost;
+          // 回答完成：移除尾部思考指示器
+          if (thinkingHint) thinkingHint.remove();
         } else if (ev.type === 'meta') {
           threadId = ev.thread_id || threadId;
         } else if (ev.type === 'error') {
@@ -990,6 +1006,8 @@ async function ask() {
     }
     removeTyping();
     removeToolStatus();
+    // 兜底：异常断流时也移除思考指示器
+    if (thinkingHint) thinkingHint.remove();
     flushRender();
     if (!answer) bubble.textContent = '（无回答）';
 
