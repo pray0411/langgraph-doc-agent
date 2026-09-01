@@ -388,7 +388,6 @@
       <div class="input-box">
         <button id="uploadBtn" title="上传文档（.md/.txt/.py 等，供文档问答）">📎</button>
         <input type="file" id="fileInput" accept=".md,.txt,.py,.rst,.html" multiple hidden>
-        <button id="keyToggle" title="设置">⚙</button>
         <textarea id="question" rows="1" placeholder="发送消息…（Enter 发送，Shift+Enter 换行）"></textarea>
         <button id="askBtn" title="发送">➤</button>
       </div>
@@ -404,7 +403,6 @@ const btn = document.getElementById('askBtn');
 const chatInner = document.getElementById('chatInner');
 const chatArea = document.getElementById('chatArea');
 const keyPanel = document.getElementById('keyPanel');
-const keyToggle = document.getElementById('keyToggle');
 const keyPanelClose = document.getElementById('keyPanelClose');
 const currentModel = document.getElementById('currentModel');
 const cfgProvider = document.getElementById('cfgProvider');
@@ -1270,10 +1268,6 @@ document.getElementById('menuBtn').addEventListener('click', () => {
 });
 document.getElementById('settingsBtn').addEventListener('click', () => keyPanel.classList.toggle('open'));
 
-keyToggle.addEventListener('click', () => {
-  keyPanel.classList.toggle('open');
-  if (keyPanel.classList.contains('open')) cfgMsg.textContent = '';
-});
 keyPanelClose.addEventListener('click', () => keyPanel.classList.remove('open'));
 
 document.getElementById('cfgSave').addEventListener('click', async () => {
