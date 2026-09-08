@@ -129,6 +129,20 @@ python -X utf8 main.py web
   （`GET /api/sessions`、`GET /api/sessions/{id}/messages`、`DELETE /api/sessions/{id}`）
 - 命令行 `python -X utf8 main.py ask "问题"` 为单轮（不传 thread_id）
 
+## 全局记忆（跨会话，profile 表）
+
+**分层记忆架构**：会话记忆（checkpointer，thread 内短期）+ **全局记忆** +
+system prompt 约束（规则）。
+
+- 全局记忆存用户**长期稳定信息**（称呼/身份/语言偏好/项目背景），跨会话保留，
+  与会话记忆分离存储（`data/global_memory.sqlite` 的 `profile` 表，key 去重覆盖）
+- 模型在对话中**主动 remember**（透露稳定个人信息时）与 **forget**（用户要求遗忘时）
+- 注入方式：每次构建 agent 时把记忆拼进 system prompt；记忆版本号纳入 agent
+  缓存 key，remember/forget 后自动重建——无需每次对话重建
+- 管控：`GET /api/memory` 查看、`DELETE /api/memory?key=<键>` 遗忘
+- 设计取舍：本项目记忆是"精确事实"而非"模糊回忆"，结构化 profile 表比向量检索
+  更省更准；向量式长期记忆（Mem0 类）适合海量非结构化场景，暂不需要
+
 ## 前端界面
 
 零依赖单文件前端（`static/index.html`，无构建工具）：
@@ -177,7 +191,8 @@ python -X utf8 main.py web
 
 ```
 langgraph-doc-agent/
-├── graph.py         # ★ 核心：langchain create_agent 通用 Agent + 反思逻辑 + checkpointer 记忆
+├── graph.py         # ★ 核心：langchain create_agent 通用 Agent + 反思逻辑 + checkpointer 会话记忆 + 全局记忆注入
+├── memory.py        # 全局记忆（SQLite profile 表，跨会话长期记忆，模型可 remember/forget）
 ├── tools.py         # 工具集：search_documents / web_search / get_weather / write_file / run_command / open_in_browser / fetch_url
 ├── retriever.py     # jieba+BM25 + embedding 语义的 RRF 混合检索
 ├── server.py        # 网页服务（并发安全、请求超时、API Token 鉴权）

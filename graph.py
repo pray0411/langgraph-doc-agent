@@ -32,11 +32,13 @@ from prompts import SYSTEM_PROMPT
 from tools import (
     edit_file,
     fetch_url,
+    forget,
     get_current_time,
     get_weather,
     list_files,
     open_in_browser,
     read_file,
+    remember,
     run_command,
     search_documents,
     web_search,
@@ -157,6 +159,20 @@ def _estimate_tokens_from_text(text: str) -> int:
     return max(1, int(cjk / 1.5 + other / 4))
 
 
+def _system_prompt_with_memory() -> str:
+    """组装注入全局记忆的系统提示词。
+
+    三层记忆架构：checkpointer 会话记忆（短期）+ profile 全局记忆（长期）+
+    system prompt 约束（规则）。全局记忆在每次构建 agent 时读库注入，
+    记忆变化（remember/forget）→ 版本号 +1 → 缓存失效自动重建，
+    无需每次对话都重建 agent。
+    """
+    import memory as memory_mod
+
+    section = memory_mod.build_prompt_section()
+    return SYSTEM_PROMPT + ("\n\n" + section) if section else SYSTEM_PROMPT
+
+
 def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
     """构建通用 Agent（ReAct 模式 + checkpointer 多轮记忆），按 provider 缓存。
 
@@ -170,7 +186,11 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
     from config import get_runtime_config_version
 
     if memory is None:
-        version = get_runtime_config_version()
+        import memory as memory_mod
+
+        # 缓存 key = (provider, 运行时配置版本, 全局记忆版本)：
+        # 换 Key/模型或记忆变化都会触发重建（system prompt 需重新注入记忆）
+        version = (get_runtime_config_version(), memory_mod.get_version())
         cache_key = (provider, version)
         with _agent_cache_lock:
             cached = _agent_cache.get(cache_key)
@@ -214,10 +234,12 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
             search_documents, web_search, get_weather,
             write_file, read_file, list_files, edit_file,
             run_command, open_in_browser, fetch_url, get_current_time,
+            remember, forget,
         ],
         checkpointer=memory or get_memory(),
-        # 系统提示：行为准则集中管理在 prompts.py（与工具 docstring 协同）
-        system_prompt=SYSTEM_PROMPT,
+        # 系统提示：行为准则（prompts.py）+ 全局记忆注入（memory.py），
+        # 记忆变化由缓存 key 版本驱动自动重建
+        system_prompt=_system_prompt_with_memory(),
     )
     # 挂 usage 回调供 _usage_of 读取（随 agent 缓存一起保存）
     agent.__usage_handler = usage_handler  # type: ignore[attr-defined]

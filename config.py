@@ -21,6 +21,11 @@ WRITE_DIR = Path(os.getenv("WRITE_DIR", str(BASE_DIR / "generated")))
 # 多轮会话记忆存储（SQLite checkpointer）
 MEMORY_DB = os.getenv("MEMORY_DB", str(BASE_DIR / "data" / "memory.sqlite"))
 
+# 全局记忆存储（SQLite profile 表）：跨会话的用户画像/长期事实。
+# 与会话记忆分离存储：会话记忆归 LangGraph checkpointer 管理（thread 内短期），
+# 全局记忆归业务层（长期，随每次对话注入 system prompt）。
+GLOBAL_MEMORY_DB = os.getenv("GLOBAL_MEMORY_DB", str(BASE_DIR / "data" / "global_memory.sqlite"))
+
 # 本地 API token（安全加固，可选）：
 # 设置后，/ask 与 /api/config 等会消耗额度/写入配置的接口要求请求头
 # 携带 `X-API-Token: <token>`；未设置则保持开放（仅本机使用）。

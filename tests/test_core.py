@@ -410,6 +410,130 @@ def test_legacy_files_not_imported_by_runtime():
                     assert alias.name not in ("llm", "graph_v1"), f"{fname} import 了 legacy 模块"
 
 
+# ---------- 全局记忆（profile 表，跨会话长期记忆） ----------
+
+def test_global_memory_remember_list_forget(monkeypatch, tmp_path):
+    """全局记忆：写入 → 列出 → 覆盖 → 删除。"""
+    monkeypatch.setenv("GLOBAL_MEMORY_DB", str(tmp_path / "gm.sqlite"))
+    import memory as memory_mod
+
+    memory_mod.clear()
+    try:
+        r = memory_mod.remember("称呼", "杨雨龙")
+        assert r["key"] == "称呼" and r["value"] == "杨雨龙"
+        memory_mod.remember("身份", "应届生，求职 AI Agent 开发")
+        items = memory_mod.list_memory()
+        assert len(items) == 2
+        assert {i["key"] for i in items} == {"称呼", "身份"}
+
+        # 同 key 覆盖：只留最新值
+        memory_mod.remember("称呼", "小杨")
+        items2 = memory_mod.list_memory()
+        assert len(items2) == 2
+        got = {i["key"]: i["value"] for i in items2}
+        assert got["称呼"] == "小杨"
+
+        # 版本号随写入递增（驱动 agent 缓存重建）
+        v1 = memory_mod.get_version()
+        memory_mod.remember("语言偏好", "中文")
+        assert memory_mod.get_version() > v1
+
+        # 删除
+        assert memory_mod.forget("称呼") is True
+        assert memory_mod.forget("不存在") is False
+        assert not any(i["key"] == "称呼" for i in memory_mod.list_memory())
+    finally:
+        memory_mod.clear()
+
+
+def test_global_memory_rejects_bad_input(monkeypatch, tmp_path):
+    """空 key / 空 value / 超长内容应拒绝。"""
+    monkeypatch.setenv("GLOBAL_MEMORY_DB", str(tmp_path / "gm2.sqlite"))
+    import memory as memory_mod
+
+    memory_mod.clear()
+    try:
+        with pytest.raises(ValueError):
+            memory_mod.remember("", "x")
+        with pytest.raises(ValueError):
+            memory_mod.remember("key", "  ")
+        with pytest.raises(ValueError):
+            memory_mod.remember("key", "x" * 600)
+        assert memory_mod.list_memory() == []  # 超长被拒，未写入
+    finally:
+        memory_mod.clear()
+
+
+def test_global_memory_prompt_section(monkeypatch, tmp_path):
+    """build_prompt_section 应把记忆格式化为注入段；空记忆返回空串。"""
+    monkeypatch.setenv("GLOBAL_MEMORY_DB", str(tmp_path / "gm3.sqlite"))
+    import memory as memory_mod
+
+    memory_mod.clear()
+    try:
+        assert memory_mod.build_prompt_section() == ""
+        memory_mod.remember("称呼", "小杨")
+        section = memory_mod.build_prompt_section()
+        assert "全局记忆" in section
+        assert "称呼：小杨" in section
+    finally:
+        memory_mod.clear()
+
+
+def test_remember_forget_tools(monkeypatch, tmp_path):
+    """remember/forget 工具应读写全局记忆。"""
+    monkeypatch.setenv("GLOBAL_MEMORY_DB", str(tmp_path / "gm4.sqlite"))
+    import memory as memory_mod
+    from tools import forget, remember
+
+    memory_mod.clear()
+    try:
+        r = remember.invoke({"key": "项目", "value": "Pray（LangGraph Agent）"})
+        assert "已记住" in r
+        items = {i["key"]: i["value"] for i in memory_mod.list_memory()}
+        assert items["项目"] == "Pray（LangGraph Agent）"
+
+        r2 = forget.invoke({"key": "项目"})
+        assert "已遗忘" in r2
+        assert memory_mod.list_memory() == []
+    finally:
+        memory_mod.clear()
+
+
+def test_agent_rebuilt_when_memory_version_changes(monkeypatch, tmp_path):
+    """全局记忆变化应使 agent 缓存失效重建（system prompt 重新注入记忆）。"""
+    monkeypatch.setenv("GLOBAL_MEMORY_DB", str(tmp_path / "gm5.sqlite"))
+    monkeypatch.setenv("MEMORY_DB", str(tmp_path / "mem5.sqlite"))
+    import graph as graph_mod
+    import memory as memory_mod
+
+    memory_mod.clear()
+    graph_mod._agent_cache.clear()
+    try:
+        captured: list[str] = []
+        real_create = graph_mod.create_agent
+
+        def _spy_create(*args, **kwargs):
+            captured.append(kwargs.get("system_prompt", ""))
+            return real_create(*args, **kwargs)
+
+        monkeypatch.setattr(graph_mod, "create_agent", _spy_create)
+        # 先写一条记忆，再构建 → 注入含记忆的 system prompt
+        memory_mod.remember("称呼", "测试用户")
+        graph_mod.build_agent("deepseek")
+        assert captured, "应构建过 agent"
+        assert "全局记忆" in captured[0] and "测试用户" in captured[0]
+
+        # 记忆更新后再构建 → 缓存 key 变（记忆版本）→ 应再次构建并注入新值
+        memory_mod.remember("称呼", "新称呼")
+        graph_mod.build_agent("deepseek")
+        assert len(captured) == 2
+        assert "新称呼" in captured[1]
+    finally:
+        memory_mod.clear()
+        graph_mod._agent_cache.clear()
+
+
 # ---------- 多轮记忆（checkpointer） ----------
 
 def test_memory_persists_across_asks(monkeypatch, tmp_path):
@@ -917,6 +1041,48 @@ def test_http_upload_rejects_bad_name_and_type(http_server):
     # 不支持的扩展名
     status2, resp2 = _post_upload("evil.exe", b64)
     assert status2 == 400 and resp2.get("error"), "不支持的类型应被拒绝"
+
+
+# ---------- 全局记忆（真实 HTTP） ----------
+
+def test_http_memory_list_and_delete(http_server, tmp_path, monkeypatch):
+    """真实 HTTP：GET /api/memory 列表与 DELETE 遗忘。"""
+    monkeypatch.setenv("GLOBAL_MEMORY_DB", str(tmp_path / "gm_http.sqlite"))
+    import memory as memory_mod
+
+    memory_mod.clear()
+    base, _ = http_server
+    try:
+        # 先通过模块写入两条（工具路径由模型驱动，此处直接写库验证 API 层）
+        memory_mod.remember("称呼", "HTTP 测试")
+        with urllib.request.urlopen(base + "/api/memory", timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        keys = [m["key"] for m in data["memory"]]
+        assert "称呼" in keys
+
+        # DELETE /api/memory?key=称呼
+        req = urllib.request.Request(
+            base + "/api/memory?key=" + urllib.parse.quote("称呼"), method="DELETE",
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            dl = json.loads(r.read().decode("utf-8"))
+        assert dl.get("ok") is True
+
+        with urllib.request.urlopen(base + "/api/memory", timeout=10) as r:
+            data2 = json.loads(r.read().decode("utf-8"))
+        assert "称呼" not in [m["key"] for m in data2["memory"]]
+
+        # 删除不存在的 key → 404
+        req2 = urllib.request.Request(
+            base + "/api/memory?key=" + urllib.parse.quote("不存在"), method="DELETE",
+        )
+        try:
+            urllib.request.urlopen(req2, timeout=10)
+            assert False, "删除不存在的记忆应 404"
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+    finally:
+        memory_mod.clear()
 
 
 # ---------- 来源提取（sources） ----------

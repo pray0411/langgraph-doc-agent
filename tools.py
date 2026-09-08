@@ -188,6 +188,48 @@ def get_current_time() -> str:
 
 
 @tool
+def remember(key: str, value: str) -> str:
+    """把一条关于用户的长期信息记入全局记忆（跨会话保留）。
+
+    当用户透露出**稳定、可能长期有用**的个人信息时调用，例如：
+    - 称呼/身份：key="称呼"，value="杨雨龙"；key="身份"，value="应届生，求职 AI Agent 开发"
+    - 语言/格式偏好：key="语言偏好"，value="中文回答，代码示例用 Python"
+    - 项目/背景事实：key="项目"，value="正在开发 Pray（LangGraph 通用 Agent）"
+    同 key 会覆盖旧值（保留最新），所以同一主题务必用**同一个 key**。
+
+    只记"跨会话仍有用的稳定事实"：姓名、身份、偏好、正在做的事、项目背景等。
+    **不要记**临时性内容（本次提问、一次性任务、天气等），也不要把
+    "用户刚才说的话"整段照抄——提炼成一句画像事实再记。
+
+    Args:
+        key: 记忆键（简短语义化，如 称呼 / 身份 / 语言偏好 / 项目；同一主题用同一 key）
+        value: 记忆内容（一句话画像事实）
+    """
+    import memory as _mem
+
+    try:
+        r = _mem.remember(key, value)
+    except ValueError as exc:
+        return f"记忆失败: {exc}"
+    return f"✅ 已记住：{r['key']} = {r['value']}（跨会话保留，可随时用 forget 删除）"
+
+
+@tool
+def forget(key: str) -> str:
+    """删除一条全局记忆（用户要求忘掉 / 记忆过时或错误时调用）。
+
+    当用户明确说"忘掉/删除/别记住 XX"时，用对应的记忆 key 调用本工具。
+
+    Args:
+        key: 要删除的记忆键（与 remember 时一致，如 称呼）
+    """
+    import memory as _mem
+
+    ok = _mem.forget(key)
+    return f"✅ 已遗忘：{key}" if ok else f"记忆里没有 {key}（可用 /api/memory 查看全部记忆）"
+
+
+@tool
 def edit_file(file_path: str, old_text: str, new_text: str, occurrence: int = 1) -> str:
     """精确替换文件中的一段内容（修改已有代码/文档）。
 

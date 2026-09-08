@@ -185,6 +185,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._handle_session_messages(thread_id)
                 return
             self.send_error(404)
+        elif self.path == "/api/memory":
+            if not self._auth_required():
+                return
+            self._handle_memory_list()
         elif self.path == "/api/uploads":
             if not self._auth_required():
                 return
@@ -202,6 +206,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):  # noqa: N802
         if not self._auth_required():
+            return
+        # /api/memory?key=<urlencoded>：删除一条全局记忆
+        if urlsplit(self.path).path == "/api/memory":
+            qs = parse_qs(urlsplit(self.path).query)
+            key = (qs.get("key") or [""])[0]
+            if key:
+                self._handle_memory_delete(key)
+                return
+            self._json({"error": "缺少 key 参数（DELETE /api/memory?key=<键>）"}, 400)
             return
         # 形如 /api/sessions/<thread_id>
         prefix = "/api/sessions/"
@@ -470,6 +483,24 @@ class Handler(BaseHTTPRequestHandler):
 
         delete_session(thread_id)
         self._json({"ok": True, "thread_id": thread_id})
+
+    # ---------- 全局记忆 ----------
+
+    def _handle_memory_list(self):
+        """列出全局记忆（供前端展示/排查；也方便用户管控 AI 记住了什么）。"""
+        from memory import list_memory
+
+        self._json({"memory": list_memory()})
+
+    def _handle_memory_delete(self, key: str):
+        """删除一条全局记忆（用户主动遗忘）。"""
+        from memory import forget
+
+        ok = forget(key)
+        if not ok:
+            self._json({"error": f"记忆里没有 key={key}"}, 404)
+            return
+        self._json({"ok": True, "key": key, "message": f"已遗忘 {key}"})
 
     # ---------- 文档上传 ----------
 
