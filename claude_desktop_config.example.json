@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "pray": {
+      "command": "C:\\Users\\MSN\\.flareos\\runtime\\python\\3.12.0\\python.exe",
+      "args": ["-X", "utf8", "D:\\dsh工作区\\langgraph-doc-agent\\mcp_server.py"]
+    }
+  }
+}

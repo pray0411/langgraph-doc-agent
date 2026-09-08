@@ -22,3 +22,8 @@ _device_code.txt
 
 # 个人面试准备材料（仅本地参考，禁止提交）
 resume-materials.md
+
+# PyInstaller 打包产物
+dist/
+build/
+*.spec.bak

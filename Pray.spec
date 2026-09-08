@@ -27,7 +27,7 @@ excludes = [
 
 a = Analysis(
     ["desktop.py"],
-    pathex=[os.path.dirname(os.path.abspath(__file__))],
+    pathex=[SPECPATH],
     binaries=[],
     datas=[("static", "static")],   # 前端页面打进包（server 从这里读 INDEX_HTML）
     hiddenimports=[
