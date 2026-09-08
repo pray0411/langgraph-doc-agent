@@ -18,6 +18,7 @@
 接入配置见 README「MCP 接入」一节。
 """
 import argparse
+import sys
 import threading
 import uuid
 
@@ -157,7 +158,9 @@ def main():
         help="以 Streamable HTTP 模式运行（默认 stdio，供 Claude Desktop 等使用）",
     )
     args = parser.parse_args()
-    print("[Pray-MCP] 工具就绪：ask / search_documents / web_search / 记忆管理", flush=True)
+    # 注意：任何日志必须写 stderr——MCP stdio 的 stdout 是 JSONRPC 协议通道，
+    # 混入普通文本会让客户端解析失败
+    print("[Pray-MCP] 工具就绪：ask / search_documents / web_search / 记忆管理", file=sys.stderr, flush=True)
     if args.http:
         mcp.run(transport="http")
     else:
