@@ -65,7 +65,7 @@ exe = EXE(
     upx=True,
     console=False,          # 无控制台窗口（GUI 应用）
     disable_windowed_traceback=False,
-    icon=None,
+    icon=os.path.join(SPECPATH, "assets", "icon.ico"),  # 应用图标（scripts/make_icon.py 生成）
 )
 
 coll = COLLECT(
