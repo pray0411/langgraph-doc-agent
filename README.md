@@ -203,7 +203,8 @@ langgraph-doc-agent/
 ├── config.py        # 配置（运行时 provider 动态切换、记忆/检索/鉴权配置）
 ├── legacy/          # V1 历史存档（graph_v1.py / llm.py），不参与运行
 ├── start.bat        # 前台启动脚本
-├── start-background.bat  # 后台静默启动（开机自启用）
+├── start-background.bat  # 后台静默启动（不会自动注册开机自启；如需自启请自行把
+│                         #   start-background.bat 快捷方式放入「启动」文件夹）
 ├── stop.bat         # 停止服务
 ├── requirements.txt
 ├── .env.example
