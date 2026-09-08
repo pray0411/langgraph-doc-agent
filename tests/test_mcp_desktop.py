@@ -11,6 +11,7 @@
 import json
 import sys
 import threading
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -146,6 +147,94 @@ def test_desktop_start_server_serves_index():
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+# ---------- 桌面版更新检查 ----------
+
+def test_desktop_parse_version():
+    """版本号解析应支持 v 前缀/多段/异常输入。"""
+    import desktop
+
+    assert desktop._parse_version("v1.2.3") == (1, 2, 3)
+    assert desktop._parse_version("1.10") == (1, 10)
+    assert desktop._parse_version("v1.2.3-rc1") == (1, 2, 3)  # 预发布取主版本比较
+    assert desktop._parse_version("garbage") == (0,)
+    assert desktop._parse_version("") == (0,)
+    assert desktop._parse_version("1.2.3") > desktop._parse_version("1.2.0")
+    assert desktop._parse_version("1.2.3") < desktop._parse_version("1.2.10")
+
+
+def test_desktop_check_for_update_newer(monkeypatch):
+    """Release tag 高于本地版本时应返回更新信息。"""
+    import json as _json
+    import desktop
+
+    class _Resp:
+        def __init__(self, payload):
+            self._p = _json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, *a):
+            return self._p
+
+    def _fake_urlopen(req, timeout=6):
+        return _Resp({
+            "tag_name": "v9.9.9",
+            "html_url": "https://github.com/pray0411/langgraph-doc-agent/releases/tag/v9.9.9",
+        })
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    info = desktop.check_for_update()
+    assert info is not None
+    assert info["version"] == "9.9.9"
+    assert "releases" in info["url"]
+
+
+def test_desktop_check_for_update_current_or_fail(monkeypatch):
+    """已是最新 / 网络失败 / 无 release 均应静默返回 None。"""
+    import json as _json
+    import desktop
+
+    # 1) 与本地同版本 → None
+    same = desktop.APP_VERSION
+
+    class _Resp:
+        def __init__(self, payload):
+            self._p = _json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, *a):
+            return self._p
+
+    def _ok(req, timeout=6):
+        return _Resp({"tag_name": "v" + same, "html_url": "x"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", _ok)
+    assert desktop.check_for_update() is None
+
+    # 2) 网络失败 → None（不崩溃）
+    def _boom(req, timeout=6):
+        raise OSError("no network")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    assert desktop.check_for_update() is None
+
+    # 3) 404（无 release）→ None
+    def _nope(req, timeout=6):
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", _nope)
+    assert desktop.check_for_update() is None
 
 
 def test_desktop_self_check_ok():
