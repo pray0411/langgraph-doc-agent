@@ -1,0 +1,2 @@
+# MCP Server 可选依赖（mcp_server.py）
+fastmcp==4.0.3

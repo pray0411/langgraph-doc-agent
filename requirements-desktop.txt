@@ -1,0 +1,3 @@
+# 桌面端可选依赖（desktop.py）与打包
+pywebview==6.2.1
+# 打包 exe 时再加：pyinstaller

@@ -196,6 +196,8 @@ langgraph-doc-agent/
 ├── tools.py         # 工具集：search_documents / web_search / get_weather / write_file / run_command / open_in_browser / fetch_url
 ├── retriever.py     # jieba+BM25 + embedding 语义的 RRF 混合检索
 ├── server.py        # 网页服务（并发安全、请求超时、API Token 鉴权）
+├── mcp_server.py    # MCP Server：把 Pray 暴露给 Claude Desktop 等 MCP 客户端
+├── desktop.py       # 桌面端：pywebview 内嵌系统 WebView 加载本地 UI
 ├── runterm.py       # 交互终端会话（子进程管理：启动/输入/输出/停止）
 ├── main.py          # 命令行入口
 ├── config.py        # 配置（运行时 provider 动态切换、记忆/检索/鉴权配置）
@@ -215,6 +217,54 @@ langgraph-doc-agent/
 > `legacy/` 中的 `graph_v1.py`（StateGraph 版本）与 `llm.py`（V1 模型封装）仅作学习参考，
 > 不参与任何运行路径，也不要在新代码中 import 它们（见 `legacy/README.md`）。
 
+## MCP 接入（把 Pray 暴露给 Claude Desktop 等客户端）
+
+Pray 可作为一个 **MCP Server** 运行，让任意 MCP 客户端直接调用它的能力：
+
+```bash
+pip install -r requirements-mcp.txt   # 安装 fastmcp
+python -X utf8 mcp_server.py          # stdio 模式（Claude Desktop 用）
+python -X utf8 mcp_server.py --http   # Streamable HTTP 模式（MCP Inspector 调试）
+```
+
+暴露的工具：
+- **整包**：`ask(question, new_thread=False)` —— 一次调用走 Pray 完整 Agent
+  （自动检索/联网/调工具/多轮记忆），客户端把它当"一个会干活的助手"
+- **拆件**：`search_documents` / `web_search` / `get_current_time` /
+  `list_memory` / `remember` / `forget`
+
+**安全边界**：不暴露 `run_command`/`write_file`/`fetch_url` 等执行类工具——MCP
+客户端没有 Pray 前端的高危确认闸，本 server 只开放"只读检索 + 问答 + 记忆"面。
+
+接入 Claude Desktop（`claude_desktop_config.json`）：
+```json
+{
+  "mcpServers": {
+    "pray": {
+      "command": "C:\\Users\\<你>\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+      "args": ["-X", "utf8", "D:\\路径\\langgraph-doc-agent\\mcp_server.py"]
+    }
+  }
+}
+```
+（Windows 建议写 python.exe 绝对路径；模型 Key 等配置仍走项目 `.env`。）
+
+## 桌面端（pywebview）
+
+```bash
+pip install pywebview
+python -X utf8 desktop.py            # 启动桌面窗口（端口自动选空闲）
+python -X utf8 desktop.py --check    # 无窗口自检（起服务→请求首页→退出）
+```
+
+实现：后台线程运行与网页版相同的服务，pywebview 用**系统 WebView**
+（Windows = Edge WebView2，Win10/11 自带）加载页面——无 Electron/Chromium 体积，
+前端零改动（同源访问，CSRF 校验天然通过）。关窗即关服务退出。
+
+打包 exe：`pip install pyinstaller && pyinstaller Pray.spec`。
+`Pray.spec` 默认排除 torch/sentence-transformers（桌面版检索自动回退纯 BM25），
+体积 ~200MB；如需语义检索删掉对应 excludes 再打（体积 >1GB，首次要下模型）。
+
 ## 测试
 
 ```bash
@@ -231,7 +281,7 @@ Token 用量提取与成本估算、真实 HTTP 契约（thread_id/401）。
 ## 后续扩展
 
 - [ ] 更多工具：日历、邮件、数据库查询
-- [ ] 接入 MCP 生态
+- [ ] MCP 接入扩展：按需暴露更多只读工具、工具级权限确认
 
 ## License
 
