@@ -27,8 +27,7 @@ if not exist ".env" (
     if exist ".env.example" (
         copy ".env.example" ".env" >nul
         echo [WARN] No .env found - created one from .env.example.
-        echo        Please open .env and fill in your API key ^(e.g. DEEPSEEK_API_KEY^),
-        echo        then run this launcher again.
+        echo        Fill in your API key ^(e.g. DEEPSEEK_API_KEY^) and run again.
         echo.
         notepad ".env"
         pause
@@ -44,7 +43,7 @@ if errorlevel 1 (
     %PY% -m pip install -r requirements.txt
     if errorlevel 1 (
         echo.
-        echo [ERROR] Dependency installation failed. Check network or proxy, then retry.
+        echo [ERROR] Dependency installation failed. Check network / proxy, then retry.
         pause
         exit /b 1
     )
@@ -56,7 +55,7 @@ rem ---------- 4. launch desktop window if possible, else web ----------
 %PY% -c "import webview" >nul 2>nul
 if errorlevel 1 (
     echo [INFO] pywebview not installed - starting web version.
-    echo        Browser will open at http://127.0.0.1:8000  ^(Ctrl+C to stop^)
+    echo        Browser will open at http://127.0.0.1:8000  ^(close this window to stop^)
     echo.
     start "" http://127.0.0.1:8000
     %PY% -X utf8 main.py web
