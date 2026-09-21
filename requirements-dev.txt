@@ -7,7 +7,7 @@
 -r requirements.txt
 
 pytest==9.1.1
-pytest-cov==7.0.0
+pytest-cov==7.1.0
 pytest-timeout==2.4.0
 pytest-html==4.2.0          # CI 里生成可读报告（artifact）
 ruff==0.14.2                # lint + format
