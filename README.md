@@ -27,7 +27,7 @@
 | 文档上传问答 | 增量索引与通道合并有单测；合并已改为通道内归一化（不同通道分数量纲不同源） |
 | 四种交付形态（Web / CLI / MCP / 桌面） | Web 与 CLI 有契约测试；MCP 有一条 stdio 端到端冒烟；桌面端仅 `--check` 自检 |
 | 反思（reflection，含工具调用统计与 grounded 检查） | 工具调用取自模型结构化输出（可靠）；**grounded 是启发式**：剥离工具模板文本后取与回答的最长公共子串（阈值 16 字符），衡量文本复用程度，**不等于事实正确性** |
-| 工程质量（CI 六组合、覆盖率门禁、lint、漏洞扫描、依赖可安装性） | GitHub Actions 全绿可见；301 条用例、覆盖率 81%、门禁 70%；依赖可安装性由 CI job 守（四个 requirements 必须能被 pip 解析） |
+| 工程质量（CI 六组合、覆盖率门禁、lint、漏洞扫描、依赖可安装性） | GitHub Actions 全绿可见；301 条用例、覆盖率 81%、门禁 70%；依赖可安装性由 `scripts/check_deps.py` 校验（CI job 与本地共用同一实现） |
 
 ## 特性（工程与安全侧）
 
@@ -298,7 +298,11 @@ pip-audit -r requirements.txt --desc                                  # 依赖�
 
 测试套件通过三层隔离做到不依赖开发者本机环境：屏蔽 `.env` 加载、清空系统代理、包装 `socket.connect` 只放行回环地址（真实外呼须显式标记）。当前 **301 条用例**、总覆盖率 81%，门禁 70%；**各模块的覆盖率缺口在 [docs/工程质量.md](docs/工程质量.md) 中逐项披露**（含未覆盖的具体分支），另有 `[tool.mutmut]` 对 `approvals.py` / `retriever.py` 做变异测试，用于检验"测试能否抓住 bug"。
 
-**依赖可安装性**已加为 CI 门禁（`deps-installable` job）：四个 requirements 文件都必须能被 pip 解析——这条来自一次真实事故，`requirements-mcp.txt` 曾因版本冲突根本装不上，而本机因为早已装好相关包而毫无察觉。
+**依赖可安装性**是一条独立门禁（CI 的 `deps-installable` job 与本地共用 `scripts/check_deps.py`）：四个 requirements 文件都必须能被 pip 解析。它来自一次真实事故——`requirements-mcp.txt` 曾因 `mcp==1.22.0` 与 `fastmcp==4.0.3` 依赖链冲突而根本装不上，而本机因为早已装好相关包毫无察觉。
+
+```bash
+python -X utf8 scripts/check_deps.py          # 本地校验；--offline 可只用本地缓存
+```
 
 ## 验证边界
 

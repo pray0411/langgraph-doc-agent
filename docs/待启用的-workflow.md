@@ -53,10 +53,9 @@ git push origin main
 ```powershell
 cd D:\dsh工作区\langgraph-doc-agent
 
-# 1) 依赖可安装性：四个 requirements 是否自洽（CI 的 deps-installable job 就是这个）
-foreach ($f in "requirements.txt","requirements-dev.txt","requirements-mcp.txt","requirements-desktop.txt") {
-    Write-Host "== $f =="; python -m pip install --dry-run -r $f
-}
+# 1) 依赖可安装性：四个 requirements 是否自洽
+#    （CI 的 deps-installable job 调用的就是同一个脚本）
+python -X utf8 scripts\check_deps.py
 
 # 2) 真模型冒烟：三个主链路（纯问答 / 工具调用 / 检索）
 $env:PRAY_SMOKE="1"; $env:DEEPSEEK_API_KEY="sk-xxx"
