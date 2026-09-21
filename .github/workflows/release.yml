@@ -71,7 +71,7 @@ jobs:
           name: Pray-windows
           path: dist
       - name: 创建 / 更新 Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           # 自动生成 Release notes（按 PR / commit 归类）
           generate_release_notes: true
