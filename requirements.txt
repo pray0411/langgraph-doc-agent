@@ -17,7 +17,7 @@ jieba==0.42.1
 # 注意：会拉取 torch，镜像体积/安装耗时较大。
 # 只要 BM25 的话可以先装其余依赖，再单独执行：
 #   pip uninstall -y sentence-transformers torch transformers
-sentence-transformers==6.0.0
+sentence-transformers==6.1.0
 
 # 联网搜索（无 Bocha Key 时的兜底引擎）
 # 上游已把包名从 duckduckgo-search 改为 ddgs（旧名不再维护）。
