@@ -22,8 +22,10 @@ POST /api/run/stop  -> 终止终端进程
 """
 import base64
 import json
+import os
 import queue
 import re
+import socket
 import threading
 import time
 import uuid
@@ -116,11 +118,97 @@ def available_modes() -> list[str]:
     return modes
 
 
+_ALLOWED_ORIGIN_CACHE: tuple[float, set[str]] | None = None
+_ALLOWED_ORIGIN_TTL = 300.0
+
+
+def allowed_origin_hosts() -> set[str]:
+    """服务端**自己**认可的本地身份 host 集合，供来源校验使用。
+
+    为什么不能用客户端自发的 `Host` 头来比（旧实现的真实缺陷）：
+    旧规则是 `Origin 的 hostname == Host 头的 hostname`。在 DNS rebinding 场景下
+    攻击者把 `evil.com` 解析到 127.0.0.1，浏览器访问 `http://evil.com`，于是
+    `Origin: http://evil.com` 与 `Host: evil.com` **天然相等**，校验必然通过。
+    它校验的其实是"客户端自己声称的两个值彼此一致"，而不是"请求来自本机界面"。
+
+    这里改为只信任服务端能独立确认的身份：
+    - 回环地址 / localhost / 本机主机名
+    - 本机所有网卡地址（兼容局域网 IP 访问）
+    - 环境变量 `ALLOWED_ORIGINS`（逗号分隔，供自定义域名 / 反向代理场景显式放行）
+
+    攻击者控制的域名永远不在这个集合里——这才是校验能成立的原因。
+    """
+    global _ALLOWED_ORIGIN_CACHE
+    now = time.time()
+    if _ALLOWED_ORIGIN_CACHE is not None and now - _ALLOWED_ORIGIN_CACHE[0] < _ALLOWED_ORIGIN_TTL:
+        return _ALLOWED_ORIGIN_CACHE[1]
+
+    hosts = {"127.0.0.1", "localhost", "::1"}
+    try:
+        hostname = socket.gethostname()
+        hosts.add(hostname.lower())
+        for info in socket.getaddrinfo(hostname, None):
+            hosts.add(str(info[4][0]).lower())
+    except OSError:
+        pass
+    for extra in (os.getenv("ALLOWED_ORIGINS") or "").split(","):
+        extra = extra.strip().lower()
+        if extra:
+            hosts.add(urlsplit("//" + extra).hostname or extra)
+
+    _ALLOWED_ORIGIN_CACHE = (now, hosts)
+    return hosts
+
+
+def reset_origin_cache() -> None:
+    """清空来源白名单缓存（测试复位 / 运行中改了 ALLOWED_ORIGINS 后用）。"""
+    global _ALLOWED_ORIGIN_CACHE
+    _ALLOWED_ORIGIN_CACHE = None
+
+
+# 连通性自检（/api/config/test）被拒绝的目标。
+# 该接口会向客户端传入的 base_url 发请求**并把响应体前 500 字符回显**，
+# 于是"默认无鉴权 + 本机可访问内网"组合起来就是一个可用的 SSRF 原语——
+# 外部评审据此指出可以拿它探测内网 / 云元数据。这里挡掉最典型、且几乎
+# 不可能有正当用途的目标（云实例元数据是 SSRF 拿凭据的首选目标）。
+# 说明：**不**封私网地址段——"自检局域网里的自建网关"正是本功能的正当用途，
+# 一刀切会把它废掉。残留面已在 README「安全边界」写明。
+_BLOCKED_PROBE_HOSTS = {
+    "169.254.169.254",          # AWS / Azure / GCP 元数据
+    "metadata.google.internal",  # GCP 元数据域名
+    "100.100.100.200",           # 阿里云元数据
+}
+
+
+def blocked_probe_target(raw_url: str) -> str:
+    """连通性自检的目标地址校验。返回拒绝原因，空串表示放行。"""
+    if not raw_url:
+        return "地址为空"
+    try:
+        parts = urlsplit(raw_url if "://" in raw_url else "//" + raw_url)
+    except ValueError:
+        return "地址无法解析"
+    scheme = (parts.scheme or "http").lower()
+    if scheme not in ("http", "https"):
+        return f"不支持的协议 {scheme!r}（仅允许 http/https）"
+    host = (parts.hostname or "").lower()
+    if not host:
+        return "缺少主机名"
+    if host in _BLOCKED_PROBE_HOSTS:
+        return f"{host} 属于云元数据地址"
+    if host.startswith("169.254."):
+        return f"{host} 属于链路本地地址段（169.254.0.0/16）"
+    return ""
+
+
 class Handler(BaseHTTPRequestHandler):
     def _auth_ok(self) -> bool:
         """API token 校验：配置了 API_TOKEN 时，要求请求头 X-API-Token 匹配。
 
-        未配置 token（默认）时始终放行，保持本机使用的零配置体验。
+        未配置 token（默认）时始终放行，保持本机使用的零配置体验——
+        **前提是默认只绑回环地址**（`server.run` 默认 127.0.0.1）。
+        若把服务暴露到局域网/公网，必须自行配置 API_TOKEN（README「安全边界」）。
+        这一层只管"你是谁"；"请求从哪来"由 `_origin_ok` 负责，两层职责分开。
         """
         from config import API_TOKEN
 
@@ -128,48 +216,74 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return self.headers.get("X-API-Token", "") == API_TOKEN
 
-    def _csrf_ok(self) -> bool:
-        """CSRF 防护：状态变更请求（POST/DELETE/PUT/PATCH）必须来自本站。
+    def _origin_ok(self) -> tuple[bool, str]:
+        """来源校验：这次状态变更请求是否可能来自本机界面。返回 (是否放行, 原因)。
 
-        恶意网页可用 form 表单（simple request，无 CORS 预检）向本机端口
-        发请求——若不校验，浏览器会替你调用 /api/run/start 执行任意命令。
-        Origin 头由浏览器设置且跨站无法伪造。校验规则（精确 hostname 比较，
-        杜绝 `127.0.0.1.evil.com` 这类子串匹配绕过）：
-        - Origin 缺失 → 非浏览器客户端（curl/脚本），放行
-        - Origin == "null" → sandboxed iframe/data: 页面，拒绝
-        - Origin hostname == 请求 Host hostname → 同源放行
-          （同源比对天然兼容局域网 IP / 自定义域名访问，不再硬编码回环）
-        - 其余一律拒绝（跨站）
+        恶意网页可用 form 表单（simple request，无 CORS 预检）向本机端口发请求——
+        不校验的话，浏览器会替你调用 `/api/approve` 把任意命令登记为"用户已批准"，
+        再调 `/api/run/start` 执行它。规则按顺序：
+
+        1. 携带了**已配置且正确**的 API Token → 放行。显式凭据不是"环境凭据"，
+           CSRF 的威胁模型不适用（浏览器不会替你把这个头带上）。
+        2. 有 Origin → 其 hostname 必须在服务端认可的本地身份集合内
+           （见 `allowed_origin_hosts`）。**不再与客户端自发的 Host 头比较**。
+        3. 无 Origin → 看 `Sec-Fetch-Site`：显式标记跨站则拒绝。
+           现代浏览器对跨站请求至少会带 Origin / Sec-Fetch-Site 之一；
+           两者都没有的是 curl 等非浏览器客户端，放行以保持可用性
+           （这条残留面已在 README「安全边界」中写明）。
         """
-        origin = self.headers.get("Origin", "")
-        if not origin:
-            return True  # 非浏览器客户端
-        if origin == "null":
-            return False
-        try:
-            origin_host = urlsplit(origin).hostname or ""
-        except ValueError:
-            return False
-        if not origin_host:
-            return False
+        from config import API_TOKEN
+
+        if API_TOKEN and self.headers.get("X-API-Token", "") == API_TOKEN:
+            return True, "token"
+        allowed = set(allowed_origin_hosts())
+        bound = getattr(getattr(self, "server", None), "server_address", ("",))[0]
+        if bound and bound not in ("0.0.0.0", "::", ""):
+            allowed.add(str(bound).lower())
+
+        # 先看 Host 头。注意：这里**不是**把它当作可信依据，而是当作可疑信号——
+        # 请求带来的 Host 若不是本机已知身份，说明有东西把外部域名解析到了本机
+        # 端口（DNS rebinding 的典型特征）。这一层不依赖浏览器是否发送
+        # Origin / Sec-Fetch-Site，是覆盖面最广的一道。
         host_header = self.headers.get("Host", "")
         if host_header:
             try:
-                host_host = urlsplit("//" + host_header).hostname or ""
+                host_host = (urlsplit("//" + host_header).hostname or "").lower()
             except ValueError:
                 host_host = ""
-            return host_host == origin_host
-        # 无 Host 头（HTTP/1.0 客户端）：仅放行本机回环来源
-        return origin_host in ("127.0.0.1", "localhost", "::1")
+            if host_host and host_host not in allowed:
+                return False, f"Host {host_host} 不是本机已知身份（疑似域名解析劫持）"
+
+        origin = self.headers.get("Origin", "")
+        if origin:
+            if origin == "null":
+                return False, "Origin=null（sandboxed iframe / data: 页面）"
+            try:
+                origin_host = (urlsplit(origin).hostname or "").lower()
+            except ValueError:
+                return False, "Origin 无法解析"
+            if not origin_host:
+                return False, "Origin 缺少 hostname"
+            if origin_host in allowed:
+                return True, "origin"
+            return False, f"来源 {origin_host} 不是本机已知身份"
+        site = self.headers.get("Sec-Fetch-Site", "")
+        if site and site not in ("same-origin", "none"):
+            return False, f"Sec-Fetch-Site={site}"
+        return True, "non-browser"
 
     def _auth_required(self) -> bool:
-        """校验 token + CSRF；失败时写 401/403 并返回 False。"""
+        """校验 token + 来源；失败时写 401/403 并返回 False。"""
         if not self._auth_ok():
             self._json({"error": "缺少或无效的 API Token（请在 .env 配置 API_TOKEN）"}, 401)
             return False
-        if self.command in ("POST", "DELETE", "PUT", "PATCH") and not self._csrf_ok():
-            self._json({"error": "跨站请求被拒绝（CSRF 防护）"}, 403)
-            return False
+        if self.command in ("POST", "DELETE", "PUT", "PATCH"):
+            ok, reason = self._origin_ok()
+            if not ok:
+                audit("origin_rejected", method=self.command, path=self.path[:200],
+                      reason=reason, origin=self.headers.get("Origin", "")[:200])
+                self._json({"error": f"来源校验失败，已拒绝（{reason}）"}, 403)
+                return False
         return True
 
     def do_GET(self):  # noqa: N802
@@ -247,12 +361,25 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/api/open"):
             if not self._auth_required():
                 return
+            # /api/open 会调系统默认程序打开文件——这是**有副作用的 GET**。
+            # _auth_required 只对 POST/DELETE/PUT/PATCH 做来源校验，而跨站
+            # `<img src="http://127.0.0.1:8000/api/open?file=x">` 正好靠 GET 绕过。
+            # 这里显式补一次来源校验（现代浏览器对跨站 <img> 会带
+            # `Sec-Fetch-Site: cross-site`，会被拒）。
+            ok, reason = self._origin_ok()
+            if not ok:
+                audit("origin_rejected", method="GET", path="/api/open",
+                      reason=reason, origin=self.headers.get("Origin", "")[:200])
+                self._json({"error": f"来源校验失败，已拒绝（{reason}）"}, 403)
+                return
             self._handle_open_file()
         else:
             self.send_error(404)
 
     def do_DELETE(self):  # noqa: N802
         if not self._auth_required():
+            return
+        if not self._body_ok():
             return
         # /api/memory?key=<urlencoded>：删除一条全局记忆
         if urlsplit(self.path).path == "/api/memory":
@@ -280,6 +407,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self):  # noqa: N802
+        # 请求体大小在分发入口就拦掉，回 413 而不是让上层误报 400「缺少参数」
+        if not self._body_ok():
+            return
         if self.path == "/api/mode":
             if not self._auth_required():
                 return
@@ -853,6 +983,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": "缺少 base_url"}, 400)
             return
 
+        blocked_reason = blocked_probe_target(base_url)
+        if blocked_reason:
+            audit("gateway_probe", provider=provider, base_url=base_url, ok=False,
+                  blocked=True, reason=blocked_reason)
+            self._json({"ok": False, "error": f"目标地址被拒绝：{blocked_reason}"}, 400)
+            return
+
         url = base_url.rstrip("/") + "/models"
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
         try:
@@ -874,8 +1011,28 @@ class Handler(BaseHTTPRequestHandler):
                   error=str(exc)[:200])
             self._json({"ok": False, "url": url, "message": f"无法连通: {exc}"}, 200)
 
+    def _body_ok(self) -> bool:
+        """请求体大小校验：在读取前拦掉超限请求并回 **413**。
+
+        原实现由 `_read_form` 静默返回 `{}`，上层于是把它报成
+        400「缺少参数」——客户端完全看不出真正原因是"请求体太大"
+        （外部评审指出）。这里把判定提到分发入口，错误码才说得清。
+        """
+        raw = self.headers.get("Content-Length")
+        if raw is None:
+            return True
+        try:
+            length = int(raw)
+        except (TypeError, ValueError):
+            self._json({"error": f"Content-Length 非法: {raw!r}"}, 400)
+            return False
+        if length > MAX_BODY:
+            self._json({"error": f"请求体过大：{length} 字节，上限 {MAX_BODY} 字节"}, 413)
+            return False
+        return True
+
     def _read_form(self) -> dict:
-        """读取表单并限制大小。失败返回 {}。"""
+        """读取表单并限制大小。失败返回 {}（大小校验见 `_body_ok`）。"""
         length = int(self.headers.get("Content-Length", 0))
         if length > MAX_BODY:
             return {}
@@ -953,8 +1110,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-            self._json({"ok": True, "path": str(target)})
+            # 建目录后**重新解析并再校验一次**。
+            # resolve-then-check 之间存在 TOCTOU 窗口：若某一级父目录在 mkdir
+            # 之后、write 之前被换成指向外部的符号链接，第一次校验就失效了；
+            # 另外"父目录本身是符号链接、但目标文件当时还不存在"的写法，
+            # 单次 resolve 也可能漏判。这里补一次，把窗口收窄到
+            # "重新解析 → 写入"之间这一小段（外部评审指出）。
+            final = target.resolve()
+            if not final.is_relative_to(write_root):
+                self._json({"error": "路径超出允许目录（父目录符号链接指向外部）"}, 400)
+                return
+            final.write_text(content, encoding="utf-8")
+            self._json({"ok": True, "path": str(final)})
         except OSError as exc:
             self._json({"error": f"写入失败: {exc}"}, 500)
 
@@ -1011,10 +1178,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def reset_state() -> None:
-    """重置进程级状态（测试复位用）：当前模式 + 上传索引缓存。"""
+    """重置进程级状态（测试复位用）：当前模式 + 来源白名单缓存。"""
     global _current_mode
     with _mode_lock:
         _current_mode = None
+    reset_origin_cache()
 
 
 def run(host: str = "127.0.0.1", port: int = 8000):

@@ -65,11 +65,53 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 # 联网搜索（双引擎：配了 Bocha 用博查中文搜索，否则退回 DuckDuckGo）
 BOCHA_API_KEY = os.getenv("BOCHA_API_KEY", "")
 
+def _warn_bad_env(name: str, raw: str, default) -> None:
+    """提示某个环境变量值非法并已回退（走 stderr，避免依赖日志模块）。"""
+    import sys
+
+    print(
+        f"[config] 环境变量 {name}={raw!r} 不是合法数值，已回退为默认值 {default!r}",
+        file=sys.stderr,
+    )
+
+
+def _env_int(name: str, default: int) -> int:
+    """读整数环境变量；非法值回退默认并告警，**不让进程在 import 期崩掉**。
+
+    修的问题（外部评审指出）：原实现是 `int(os.getenv("TOP_K", "3"))` 这种写法，
+    `.env` 里写错一个字符（`TOP_K=3o`）就会在 import 阶段抛 ValueError——
+    程序连启动都到不了，错误信息还只有一个裸堆栈。而"配置写错"恰恰是
+    最可预期的一类输入错误，应该被友好地兜住，而不是让整个服务起不来。
+    """
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        _warn_bad_env(name, raw, default)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    """读浮点环境变量；语义同 `_env_int`。"""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError:
+        _warn_bad_env(name, raw, default)
+        return default
+
+
 # 检索
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
-TOP_K = int(os.getenv("TOP_K", "3"))
-MIN_SCORE = float(os.getenv("MIN_SCORE", "0.0"))  # 检索最低分数阈值（混合检索融合分）
+CHUNK_SIZE = _env_int("CHUNK_SIZE", 500)
+CHUNK_OVERLAP = _env_int("CHUNK_OVERLAP", 100)
+TOP_K = _env_int("TOP_K", 3)
+# 检索最低分数阈值（混合检索融合分）。注意：RRF 融合分恒为正，
+# 因此默认 0.0 等于**关闭阈值**（不会过滤任何结果）——想要过滤必须显式设正值。
+MIN_SCORE = _env_float("MIN_SCORE", 0.0)
 
 # 语义检索模型（sentence-transformers，本地运行无需 API Key）
 # 未配置/加载失败时自动回退纯 BM25 检索

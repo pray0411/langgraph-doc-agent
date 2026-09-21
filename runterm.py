@@ -18,7 +18,6 @@
 """
 import os
 import queue
-import re
 import subprocess
 import threading
 import time
@@ -33,41 +32,52 @@ logger = get_logger(__name__)
 _sessions: dict[str, dict] = {}
 _sessions_lock = threading.Lock()
 
-_MAX_OUTPUT_BUFFER = 100_000  # 单会话输出缓冲上限（防内存膨胀）
+# 资源上限（外部评审指出：原实现会话数、输出队列、单行长度三者皆无上限，可被打满）
+_MAX_SESSIONS = 8             # 并发会话数
+_MAX_QUEUE = 2_000            # 单会话待取输出行数上限（有界队列，防堆积）
+_MAX_LINE_CHARS = 8_192       # 单行读取上限（防一行超长输出吃满内存）
+_MAX_OUTPUT_BUFFER = 100_000  # 单会话已读缓冲上限（防内存膨胀）
 
 
-def _load_patterns() -> tuple[list[str], list[str]]:
-    """取命令黑名单与高危名单（调用点导入，避免导入时快照）。"""
-    from tools import _BLOCKED_PATTERNS, _HIGH_RISK_PATTERNS
+def _classify(command: str) -> tuple[str, str]:
+    """取命令分级（调用点导入，避免导入时快照）。
 
-    return _BLOCKED_PATTERNS, _HIGH_RISK_PATTERNS
+    修复的问题：原实现自己维护一套黑名单/高危判定，与 `tools.run_command`
+    是**两份会各自漂移的副本**。外部评审已指出 tools 侧的判定漏掉
+    `python xxx.py`；如果这里继续留一份副本，同样的问题要修两遍、
+    且必然有一次会忘。现在两条路径共用同一个分类器。
+    """
+    from tools import classify_command
 
-
-def _blocked(command: str) -> str | None:
-    """命中黑名单返回拦截原因，否则 None。"""
-    blocked_patterns, _ = _load_patterns()
-    for pat in blocked_patterns:
-        if re.search(pat, command, re.IGNORECASE):
-            return f"⛔ 已拦截：命令包含破坏性操作（{pat}）"
-    return None
+    return classify_command(command)
 
 
 def start(command: str) -> dict:
     """启动一个交互式子进程，返回 {session_id} 或 {error}。"""
     from config import WRITE_DIR
 
-    blocked = _blocked(command)
-    if blocked:
-        audit("runterm_start", outcome="blocked", command_preview=command[:120])
-        return {"error": blocked}
-    # 高危命令（删除/移动/安装包/联网下载等）须用户批准（approvals 登记）
-    _, high_risk_patterns = _load_patterns()
-    if any(re.search(p, command, re.IGNORECASE) for p in high_risk_patterns):
+    level, reason = _classify(command)
+    if level == "blocked":
+        audit("runterm_start", outcome="blocked", command_preview=command[:120], detail=reason)
+        return {"error": f"⛔ 已拦截：命令{reason}"}
+    if level == "high":
+        # 交互终端由前端 ▶ 触发，前端会先经 /api/approve 登记本条命令。
+        # 这里仍显式校验批准记录，不因"用户点过按钮"就放行任意命令——
+        # 用户点的是一段模型生成的代码，不等于审查过这条命令。
         from approvals import is_approved
 
         if not is_approved(command):
-            audit("runterm_start", outcome="need_confirm", command_preview=command[:120])
-            return {"error": "NEED_CONFIRM 高危命令需要用户确认后重试"}
+            audit("runterm_start", outcome="need_confirm", command_preview=command[:120],
+                  detail=reason)
+            return {"error": f"NEED_CONFIRM {reason}，需要用户确认后重试"}
+
+    # 会话数上限：每个会话都是一个真实进程 + 读线程 + 队列。没有上限时，
+    # 反复调用 /api/run/start 就能把进程/句柄/内存打满（外部评审指出）。
+    with _sessions_lock:
+        alive = len(_sessions)
+    if alive >= _MAX_SESSIONS:
+        audit("runterm_start", outcome="too_many_sessions", active=alive)
+        return {"error": f"并发终端会话已达上限（{_MAX_SESSIONS}），请先关闭已有会话"}
 
     cwd = Path(WRITE_DIR).resolve()
     # 目录不存在时让 Popen 抛 WinError 267（"目录名称无效"）是一类很难读懂的失败；

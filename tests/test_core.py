@@ -714,10 +714,19 @@ def test_auth_accepts_correct_token(monkeypatch):
     assert handler._auth_ok() is True
 
 
-# ---------- CSRF 防护 ----------
+# ---------- 来源校验（原 CSRF 防护）----------
+#
+# 第二轮外部评审后整体重写。旧实现是 `Origin 的 hostname == Host 头的 hostname`，
+# 而 **Host 头由客户端自己提供**：DNS rebinding 场景下攻击者把 evil.com 解析到
+# 127.0.0.1，浏览器带来的 `Origin: http://evil.com` 与 `Host: evil.com`
+# 天然相等，校验必然通过。也就是说旧用例测的是"客户端声称的两个值是否自洽"，
+# 根本测不出跨站——**测试通过反而给出了虚假的安全感**。
+#
+# 新实现改为与服务端**自己**能确认的本地身份集合比对，并把 Host 头从
+# "可信依据"降级为"可疑信号"。
 
-def _csrf_handler(headers):
-    """构造带指定请求头的 Handler 实例。"""
+def _origin_handler(headers):
+    """构造带指定请求头的 Handler 实例（仅用于来源校验单元测试）。"""
     from server import Handler
 
     handler = Handler.__new__(Handler)
@@ -725,38 +734,87 @@ def _csrf_handler(headers):
     return handler
 
 
-def test_csrf_allows_loopback_same_origin():
-    """本机来源（Origin == Host）应放行。"""
-    assert _csrf_handler({"Origin": "http://127.0.0.1:8000", "Host": "127.0.0.1:8000"})._csrf_ok()
-    assert _csrf_handler({"Origin": "http://localhost:8000", "Host": "localhost:8000"})._csrf_ok()
+def _origin_allowed(headers) -> bool:
+    return _origin_handler(headers)._origin_ok()[0]
 
 
-def test_csrf_allows_lan_same_origin():
-    """局域网访问（Origin == 局域网 Host）应放行（与 README 的局域网用法一致）。"""
-    assert _csrf_handler({"Origin": "http://192.168.1.5:8000", "Host": "192.168.1.5:8000"})._csrf_ok()
+def test_origin_allows_loopback_and_localhost():
+    """回环地址 / localhost 来源应放行（默认部署形态）。"""
+    assert _origin_allowed({"Origin": "http://127.0.0.1:8000", "Host": "127.0.0.1:8000"})
+    assert _origin_allowed({"Origin": "http://localhost:8000", "Host": "localhost:8000"})
+    assert _origin_allowed({"Origin": "http://127.0.0.1:55000", "Host": "127.0.0.1:55000"})
 
 
-def test_csrf_rejects_ip_prefix_domain():
-    """`127.0.0.1.evil.com` 这类子串绕过必须被拒绝（精确 hostname 匹配）。"""
-    assert not _csrf_handler({"Origin": "http://127.0.0.1.evil.com", "Host": "127.0.0.1:8000"})._csrf_ok()
-    assert not _csrf_handler({"Origin": "http://localhost.evil.com", "Host": "localhost:8000"})._csrf_ok()
-    assert not _csrf_handler({"Origin": "https://127.0.0.1.attacker.io", "Host": "127.0.0.1:8000"})._csrf_ok()
+def test_origin_allows_explicitly_configured_origin(monkeypatch):
+    """ALLOWED_ORIGINS 是局域网 / 自定义域名 / 反代场景的显式放行开关。"""
+    import server
+
+    monkeypatch.setenv("ALLOWED_ORIGINS", "192.168.1.5,app.internal:8000")
+    server.reset_origin_cache()
+    try:
+        assert _origin_allowed({"Origin": "http://192.168.1.5:8000", "Host": "192.168.1.5:8000"})
+        assert _origin_allowed({"Origin": "http://app.internal:8000", "Host": "app.internal:8000"})
+        # 没在名单里的邻居地址仍然拒绝
+        assert not _origin_allowed({"Origin": "http://192.168.1.6:8000", "Host": "192.168.1.6:8000"})
+    finally:
+        server.reset_origin_cache()
 
 
-def test_csrf_rejects_cross_origin():
-    """普通跨站来源应被拒绝。"""
-    assert not _csrf_handler({"Origin": "http://evil.com", "Host": "127.0.0.1:8000"})._csrf_ok()
+def test_origin_rejects_dns_rebinding():
+    """**核心回归**：Origin 与 Host 都指向攻击者域名时必须拒绝。
+
+    这是旧实现漏掉的真实攻击路径——两个头由同一个攻击者页面提供，彼此一致，
+    旧校验因此放行。新实现拿它们跟"本机已知身份"比，必然不匹配。
+    """
+    assert not _origin_allowed({"Origin": "http://evil.com", "Host": "evil.com"})
+    assert not _origin_allowed({"Origin": "http://attacker.test:8000", "Host": "attacker.test:8000"})
+    # 连 Origin 都不带的写法（老式表单 / 非 fetch 请求）也必须挡住
+    assert not _origin_allowed({"Host": "evil.com"})
 
 
-def test_csrf_rejects_null_origin():
+def test_origin_rejects_lookalike_domains():
+    """`127.0.0.1.evil.com` 这类前缀伪装必须被拒绝（精确 hostname 比较）。"""
+    assert not _origin_allowed({"Origin": "http://127.0.0.1.evil.com", "Host": "127.0.0.1:8000"})
+    assert not _origin_allowed({"Origin": "http://localhost.evil.com", "Host": "localhost:8000"})
+    assert not _origin_allowed({"Origin": "https://127.0.0.1.attacker.io", "Host": "127.0.0.1:8000"})
+    assert not _origin_allowed({"Origin": "http://192.168.1.5.evil.com", "Host": "127.0.0.1:8000"})
+
+
+def test_origin_rejects_null_origin():
     """sandboxed iframe / data: 页面的 Origin=null 应被拒绝。"""
-    assert not _csrf_handler({"Origin": "null", "Host": "127.0.0.1:8000"})._csrf_ok()
+    assert not _origin_allowed({"Origin": "null", "Host": "127.0.0.1:8000"})
 
 
-def test_csrf_allows_missing_origin():
-    """非浏览器客户端（无 Origin）应放行。"""
-    assert _csrf_handler({"Host": "127.0.0.1:8000"})._csrf_ok()
-    assert _csrf_handler({})._csrf_ok()
+def test_origin_rejects_cross_site_without_origin():
+    """无 Origin、但显式声明跨站（Sec-Fetch-Site）时也要拒绝。
+
+    "无 Origin 一律放行"曾是可被利用的残留面：跨站 `<img>` 与部分老式表单
+    不带 Origin，但会带 Sec-Fetch-Site。
+    """
+    assert not _origin_allowed({"Sec-Fetch-Site": "cross-site", "Host": "127.0.0.1:8000"})
+    assert not _origin_allowed({"Sec-Fetch-Site": "same-site", "Host": "127.0.0.1:8000"})
+
+
+def test_origin_allows_non_browser_client():
+    """curl / 脚本等非浏览器客户端（无 Origin / Sec-Fetch-Site）应放行，保持可用性。"""
+    assert _origin_allowed({"Host": "127.0.0.1:8000"})
+    assert _origin_allowed({})
+    assert _origin_allowed({"Host": "127.0.0.1:8000", "Sec-Fetch-Site": "same-origin"})
+
+
+def test_csrf_legacy_helper_name_is_gone():
+    """`_csrf_ok` 已改名为 `_origin_ok`，且旧实现不能被悄悄恢复。
+
+    防的是"回退到根据 Host 头自证的写法"——这种回退在任何界面上看都是绿的。
+    """
+    import inspect
+
+    import server
+
+    assert not hasattr(server.Handler, "_csrf_ok"), "旧的 _csrf_ok 不应再存在"
+    assert "host_header ==" not in inspect.getsource(server.Handler._origin_ok), (
+        "_origin_ok 不应再直接拿 Host 头与 Origin 做相等比较"
+    )
 
 
 # ---------- 真实 HTTP 契约测试（起真实 ThreadingHTTPServer） ----------
@@ -879,7 +937,7 @@ def test_http_auth_401_without_token(monkeypatch):
 
 
 def test_http_csrf_rejects_cross_origin_post(http_server):
-    """真实 HTTP：带跨站 Origin 的 POST 应被 CSRF 拒绝（403）。"""
+    """真实 HTTP：带跨站 Origin 的 POST 应被来源校验拒绝（403）。"""
     base, _ = http_server
     data = urllib.parse.urlencode({"mode": "deepseek"}).encode()
     req = urllib.request.Request(
@@ -891,7 +949,28 @@ def test_http_csrf_rejects_cross_origin_post(http_server):
             assert False, "跨站 POST 不应成功"
     except urllib.error.HTTPError as e:
         assert e.code == 403
-        assert "CSRF" in e.read().decode("utf-8")
+        assert "来源校验失败" in e.read().decode("utf-8")
+
+
+def test_http_csrf_rejects_dns_rebinding(http_server):
+    """真实 HTTP：DNS rebinding（Origin 与 Host 同为攻击者域名）必须 403。
+
+    这条是上面那条的**加强版**：它模拟的是"浏览器真的把 evil.com 解析到了
+    本机端口"，因此 Host 头也是 evil.com。旧实现下这种请求会被放行。
+    """
+    base, _ = http_server
+    port = urllib.parse.urlparse(base).port
+    data = urllib.parse.urlencode({"mode": "deepseek"}).encode()
+    req = urllib.request.Request(
+        base + "/api/mode", data=data, method="POST",
+        headers={"Origin": f"http://evil.com:{port}", "Host": f"evil.com:{port}",
+                 "Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            assert False, "rebinding 请求不应成功"
+    except urllib.error.HTTPError as e:
+        assert e.code == 403
 
 
 def test_http_csrf_rejects_ip_prefix_domain(http_server):
@@ -1471,13 +1550,76 @@ def test_write_file_rejects_path_escape(monkeypatch, tmp_path):
 
 # ---------- run_command 命令工具 ----------
 
+def _approved_run(run_command, **payload):
+    """默认拒绝模型下的辅助：先模拟"用户在前端确认"，再以 confirmed=True 调用。
+
+    为什么不直接把 confirmed 传 True 了事：`run_command` 会校验后端批准登记
+    （approvals），没有登记记录时 confirmed=True 同样被拒。走这条辅助函数，
+    测试经过的是与真实请求**完全相同**的授权路径，而不是绕过它。
+    """
+    import approvals
+
+    approvals.approve(payload["command"])
+    return run_command.invoke({**payload, "confirmed": True})
+
+
+def test_run_command_interpreter_requires_approval(monkeypatch, tmp_path):
+    """**核心回归**：跑脚本 / 解释器必须经过用户批准。
+
+    这是外部评审指出的真实漏洞：旧实现靠"命令长得像不像危险命令"判定，
+    `python xxx.py`、`python -c "..."`（`rmtree` 不含 `remove`）都不命中任何
+    规则，于是「write_file 写脚本 + run_command 跑脚本」成了**零确认的任意
+    代码执行**——而"写→跑→修"正是本项目主推的用法，护栏被自家主推姿势绕开。
+    """
+    import config as config_mod
+    from tools import classify_command, run_command
+
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+
+    for cmd in (
+        sys.executable + " -c \"print('x')\"",
+        "python script.py",
+        "python -c \"import shutil; shutil.rmtree('x')\"",
+        "powershell -Command Get-ChildItem",
+        "node app.js",
+        "bash run.sh",
+    ):
+        assert classify_command(cmd)[0] == "high", f"应判为高危：{cmd}"
+        r1 = run_command.invoke({"command": cmd, "confirmed": False})
+        assert "NEED_CONFIRM" in r1, f"未批准就执行了：{cmd}"
+        r2 = run_command.invoke({"command": cmd, "confirmed": True})
+        assert "NEED_CONFIRM" in r2, f"模型自填 confirmed 竟然放行：{cmd}"
+
+
+def test_run_command_safe_readonly_runs_without_approval(monkeypatch, tmp_path):
+    """只读白名单内的命令无需确认——"默认拒绝"不等于"什么都拦"。"""
+    import config as config_mod
+    from tools import run_command
+
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+    r = run_command.invoke({"command": "dir", "confirmed": False})
+    assert "NEED_CONFIRM" not in r, f"只读命令不该要求确认：{r[:120]}"
+
+
+def test_run_command_shell_metachar_escapes_safe_list(monkeypatch, tmp_path):
+    """以只读命令开头、再用 shell 元字符拼接执行的写法不得被判为只读。
+
+    防的是白名单被"前缀匹配"绕过：`type a.txt && python evil.py`。
+    """
+    from tools import classify_command
+
+    assert classify_command("type a.txt && python evil.py")[0] == "high"
+    assert classify_command("dir | more")[0] == "high"
+    assert classify_command("echo hello; rm -rf /")[0] != "safe"
+
+
 def test_run_command_executes_normal_command(monkeypatch, tmp_path):
-    """普通命令应直接执行并返回输出。"""
+    """用户批准后，命令应执行并返回输出。"""
     import config as config_mod
     monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
     from tools import run_command
 
-    r = run_command.invoke({"command": sys.executable + " -c \"print('cmd-ok')\"", "confirmed": False})
+    r = _approved_run(run_command, command=sys.executable + " -c \"print('cmd-ok')\"")
     assert "执行成功" in r
     assert "cmd-ok" in r
 
@@ -1554,11 +1696,7 @@ def test_run_command_interactive_with_input(monkeypatch, tmp_path):
         "    print(f'= {eval(line)}')\n"
     )})
 
-    r = run_command.invoke({
-        "command": sys.executable + " calc.py",
-        "input_text": "3+5\nq\n",
-        "confirmed": False,
-    })
+    r = _approved_run(run_command, command=sys.executable + " calc.py", input_text="3+5\nq\n")
     assert "执行成功" in r
     assert "= 8" in r
 
@@ -1571,11 +1709,7 @@ def test_run_command_no_input_fails_fast(monkeypatch, tmp_path):
 
     write_file.invoke({"file_path": "calc2.py", "content": "print(input())\n"})
 
-    r = run_command.invoke({
-        "command": sys.executable + " calc2.py",
-        "input_text": "",
-        "confirmed": False,
-    })
+    r = _approved_run(run_command, command=sys.executable + " calc2.py", input_text="")
     # 应快速失败（EOFError），而非 30 秒超时
     assert "执行失败" in r or "EOFError" in r
 
@@ -1587,21 +1721,31 @@ def test_run_command_utf8_output_no_mojibake(monkeypatch, tmp_path):
     from tools import run_command, write_file
 
     write_file.invoke({"file_path": "zh.py", "content": "print('中文测试：你好世界')\n"})
-    r = run_command.invoke({
-        "command": sys.executable + " zh.py",
-        "input_text": "",
-        "confirmed": False,
-    })
+    r = _approved_run(run_command, command=sys.executable + " zh.py", input_text="")
     assert "你好世界" in r, f"中文不应乱码: {r[:80]}"
 
 
 # ---------- 交互终端（runterm） ----------
 
+def _runterm_start_approved(command: str) -> dict:
+    """默认拒绝模型下启动终端：先登记批准。
+
+    等价于前端点 ▶ 时的真实流程——先 `POST /api/approve` 再 `POST /api/run/start`。
+    测试走同一条路，而不是绕过授权。
+    """
+    import approvals
+
+    from runterm import start
+
+    approvals.approve(command)
+    return start(command)
+
+
 def test_runterm_interactive_flow(monkeypatch, tmp_path):
     """runterm 应支持启动→输入→输出→退出 的完整交互。"""
     import config as config_mod
     monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
-    from runterm import start, send_input, poll, stop
+    from runterm import send_input, poll, stop
 
     (tmp_path / "inter.py").write_text(
         "print('ready')\n"
@@ -1612,7 +1756,7 @@ def test_runterm_interactive_flow(monkeypatch, tmp_path):
         encoding="utf-8",
     )
 
-    r = start(sys.executable + " inter.py")
+    r = _runterm_start_approved(sys.executable + " inter.py")
     assert "session_id" in r
     sid = r["session_id"]
 
@@ -1670,7 +1814,7 @@ def test_runterm_sweep_stale_removes_idle(monkeypatch, tmp_path):
     monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
     runterm._STALE_TIMEOUT = 0  # 立即过期
 
-    r = runterm.start(sys.executable + " -c \"import time; time.sleep(30)\"")
+    r = _runterm_start_approved(sys.executable + " -c \"import time; time.sleep(30)\"")
     assert "session_id" in r
     sid = r["session_id"]
 
@@ -1693,7 +1837,7 @@ def test_runterm_send_input_updates_last_active(monkeypatch, tmp_path):
     (tmp_path / "probe.py").write_text(
         "line = input('>> ').strip()\nprint(f'got: {line}')\n", encoding="utf-8",
     )
-    r = runterm.start(f'{sys.executable} "{tmp_path / "probe.py"}"')
+    r = _runterm_start_approved(f'{sys.executable} "{tmp_path / "probe.py"}"')
     assert "session_id" in r
     sid = r["session_id"]
     try:

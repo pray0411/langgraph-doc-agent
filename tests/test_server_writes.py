@@ -494,14 +494,14 @@ def test_upload_csrf_rejects_cross_origin(web):
     """跨站 POST /api/upload 必须 403（否则恶意页面可往你机器上塞文件）。"""
     status, body = _upload(web.base, "x.md", b"hi", origin="http://evil.com")
     assert status == 403
-    assert "CSRF" in body
+    assert "来源校验失败" in body
     assert not any(web.uploads_dir.iterdir())
 
 
 def test_delete_csrf_rejects_cross_origin(web):
     status, body = _delete(web.base, "/api/uploads/x.md", origin="http://evil.com")
     assert status == 403
-    assert "CSRF" in body
+    assert "来源校验失败" in body
 
 
 def test_upload_requires_token_when_configured(web, monkeypatch):

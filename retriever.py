@@ -14,6 +14,7 @@
 """
 import json
 import math
+import os
 import re
 import threading
 from collections import Counter
@@ -59,6 +60,18 @@ _encoder_loaded = False
 _encoder_lock = threading.Lock()
 
 
+def semantic_disabled() -> bool:
+    """语义通道是否被显式关闭（环境变量 `DISABLE_SEMANTIC`）。
+
+    为什么需要这个开关 —— 质量门禁必须在这台机器和那台机器上量到**同一个东西**。
+    装了 `sentence-transformers` 走混合检索、没装走纯 BM25，两条路径的
+    recall / MRR 天然不同：同一个 commit 在"装了 torch 的机器"和"CI 容器"上给出
+    不同的指标，门禁就退化成"看你有没有装 torch"。所以评估与 CI 显式钉住纯 BM25，
+    混合检索的指标单独量、单独报，并且报告里必须写明是哪条路径。
+    """
+    return os.getenv("DISABLE_SEMANTIC", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def get_encoder():
     """获取句子编码器（懒加载，线程安全）。失败返回 None（调用方回退 BM25）。"""
     global _encoder, _encoder_loaded
@@ -68,8 +81,11 @@ def get_encoder():
         if _encoder_loaded:
             return _encoder
         _encoder_loaded = True
+        if semantic_disabled():
+            logger.info("语义通道已由 DISABLE_SEMANTIC 关闭，本进程使用纯 BM25")
+            _encoder = None
+            return _encoder
         try:
-            import os
             os.environ.setdefault("HF_HOME", str(HF_HOME))
             from sentence_transformers import SentenceTransformer
 
@@ -79,6 +95,16 @@ def get_encoder():
             logger.warning("语义检索不可用，回退纯 BM25：%s", exc)
             _encoder = None
         return _encoder
+
+
+def retrieval_mode() -> str:
+    """返回本进程**实际生效**的检索模式：`"hybrid"`（BM25 + 语义）或 `"bm25"`。
+
+    对外可见的意义很实际：报指标时能说清"这个数字是哪条路径量出来的"。
+    改造前 README 直接挂出一个 recall@3=1.00，却没说明语义通道在本机根本没装 ——
+    那个数字其实是纯 BM25 的成绩，被当成了混合检索的成绩。
+    """
+    return "hybrid" if get_encoder() is not None else "bm25"
 
 
 def encode_texts(texts: list[str]) -> list[list[float]] | None:

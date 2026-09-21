@@ -25,7 +25,13 @@
 
 ## 运行方式
 
-评估默认**参与**常规测试（它很快，纯 BM25，无模型、无网络）；要单独跑：
+评估默认**参与**常规测试，并且**固定走纯 BM25**（无模型、无网络、秒级）—— 本模块
+在导入时设置 `DISABLE_SEMANTIC=1`。为什么要钉死：门禁必须能跨机器比较，而装了
+`sentence-transformers` 的机器走混合检索、没装的机器走纯 BM25，同一个 commit 会得出
+两个不同的 recall/MRR，那样的门禁不如没有（详见 `retriever.semantic_disabled`）。
+混合检索的指标要**单独量**，且报告里必须写明模式（`retriever.retrieval_mode()`）。
+
+只跑评估：
 
     pytest -m eval -v
 
@@ -46,6 +52,10 @@ CORPUS_DIR = EVAL_DIR / "corpus"
 QA_FILE = EVAL_DIR / "qa.yaml"
 
 pytestmark = pytest.mark.eval
+
+# 把评估钉在纯 BM25 上（见模块 docstring）。写成模块级语句而不是 fixture：
+# 必须在 retriever 被导入（get_encoder 被调用）之前生效，且不能只作用于某个用例。
+os.environ["DISABLE_SEMANTIC"] = "1"
 
 
 def _load_qa() -> dict:
@@ -123,7 +133,11 @@ def test_retrieval_meets_quality_thresholds(eval_index, capsys):
 
     report = json.dumps(metrics, ensure_ascii=False, indent=2)
     with capsys.disabled():
-        print(f"\n[检索评估] {len(results)} 条查询\n{report}")
+        # 指标必须带模式标签：不写清"哪条检索路径"的成绩，数字就没有意义
+        print(
+            f"\n[检索评估] 模式={eval_index.retrieval_mode()} "
+            f"{len(results)} 条查询\n{report}"
+        )
 
     failures = []
     if metrics["recall@3"] < thresholds["recall_at_3"]:
@@ -146,6 +160,21 @@ def test_retrieval_meets_quality_thresholds(eval_index, capsys):
             + f"\n\n指标：{report}\n\n退化或未命中的查询：\n"
             + ("\n".join(missed) if missed else "  （无）")
         )
+
+
+def test_eval_is_pinned_to_bm25_mode(eval_index):
+    """门禁必须钉在**确定的一条路径**上 —— 这里断言评估跑在纯 BM25 上。
+
+    守的是"静默降级"这个坑的两面：
+    1. 语义依赖缺失时检索会**无声地**变成纯 BM25，报出的指标如果不标模式，
+       就会被当成混合检索的成绩（本项目 README 曾这样挂出 recall@3=1.00）；
+    2. 反过来，如果谁去掉了这里的钉死，指标会随"本机装没装 torch"漂移，
+       它会立刻失败，而不是让门禁悄悄换一套基准。
+    """
+    assert eval_index.semantic_disabled() is True, "评估应通过 DISABLE_SEMANTIC 钉住纯 BM25"
+    assert eval_index.retrieval_mode() == "bm25", (
+        f"评估实际跑在 {eval_index.retrieval_mode()} 模式下，指标不可跨机器比较"
+    )
 
 
 def test_eval_corpus_is_complete(eval_index):
@@ -224,6 +253,8 @@ def test_report_can_be_written_when_requested(eval_index, tmp_path):
         "",
         f"- 查询数：{len(results)}",
         f"- 语料：`tests/eval/corpus/`（{len(list(CORPUS_DIR.glob('*')))} 篇）",
+        f"- **检索模式：`{eval_index.retrieval_mode()}`**"
+        "（本报告固定为纯 BM25；混合检索指标需另行测量并单独标注）",
         "",
         "## 指标",
         "",

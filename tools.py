@@ -440,8 +440,6 @@ _BLOCKED_PATTERNS = [
 
 # 高危命令模式：需要用户在前端确认后才执行（confirmed=True）
 # 覆盖：删除文件/目录、移动/重命名、安装包、联网下载、注册表、系统设置
-# 说明：黑名单只做"拦最显眼的破坏性操作"，真正的护栏是审批登记 + 超时强杀 +
-# 目录边界（见 run_command 内的风险说明）。
 _HIGH_RISK_PATTERNS = [
     r"\brm\b", r"\bdel\b", r"\bremove\b", r"\brmdir\b",
     r"\bmove\b", r"\bren\b", r"\brename\b", r"\bcopy\b", r"\bxcopy\b", r"\brobocopy\b",
@@ -451,8 +449,88 @@ _HIGH_RISK_PATTERNS = [
     r"\battrib\b", r"\bicacls\b", r"\btaskkill\b",
 ]
 
+# 解释器 / 脚本执行入口：任何能执行任意代码的写法都归高危。
+#
+# 为什么必须单列这一组（一次外部评审指出的真实缺陷）：
+# 旧实现只做"命令长得像不像危险命令"的关键词匹配，而 `python script.py`、
+# `python -c "import shutil; shutil.rmtree(...)"`（`rmtree` 不含 `remove`）、
+# `powershell -Command ...` 都**不命中任何规则**。于是最顺手的一条路径——
+# 「write_file 写一个脚本 + run_command 跑这个脚本」——变成零确认的任意代码
+# 执行，而"写→跑→修"恰恰是本项目主推的用法。护栏被自家主推姿势绕开。
+#
+# 结论：高危判定不能建立在"能否穷举危险命令名"上。这里把执行类入口显式
+# 列出，再配合下方 classify_command 的默认拒绝，两层一起兜。
+_EXEC_PATTERNS = [
+    r"\bpython[0-9.]*\b", r"\bpythonw\b", r"\bpy\b", r"\bpip3?\b", r"\bpytest\b",
+    r"\bnode\b", r"\bnpm\b", r"\bnpx\b", r"\byarn\b", r"\bpnpm\b", r"\bdeno\b", r"\bbun\b",
+    r"\bpowershell\b", r"\bpwsh\b", r"\bcmd\b", r"\bwscript\b", r"\bcscript\b",
+    r"\bmshta\b", r"\brundll32\b", r"\bregsvr32\b", r"\bcertutil\b",
+    r"\bbitsadmin\b", r"\bwmic\b", r"\bmsiexec\b", r"\bschtasks\b",
+    r"\bsh\b", r"\bbash\b", r"\bzsh\b", r"\bperl\b", r"\bruby\b", r"\bphp\b",
+    r"\bjava\b", r"\bgo\s+run\b", r"\bcargo\b", r"\bpython\s+-c\b",
+    # 以脚本文件名收尾的写法：`xxx.py` / `xxx.ps1` / `xxx.bat` 等
+    r"\.py\b", r"\.ps1\b", r"\.bat\b", r"\.cmd\b", r"\.sh\b", r"\.vbs\b", r"\.js\b",
+]
+
+# 只读白名单：命中即可**无需确认**直接执行。
+# 这条白名单必须极窄，且额外禁止 shell 元字符（`|&;><`$` 反引号）——
+# 否则 `type x.txt && python evil.py` 会因为以 `type` 开头而被误判为只读。
+_SAFE_COMMAND_PATTERNS = [
+    r"^(dir|ls|type|cat|findstr|find|where|which|pwd|echo)\b",
+]
+_SAFE_FORBIDDEN_CHARS = set("|&;><`$%^")
+
+# 只读首词里仍能引发副作用的**选项**。最典型的是 `find`：
+# `find / -delete`、`find . -exec rm -rf {} +` 都不含 shell 元字符，
+# 只看首词会被判成"只读"，所以必须按选项名再拦一道。
+_SAFE_FORBIDDEN_SUBSTRINGS = ("-exec", "-execdir", "-ok", "-okdir", "-delete")
+
 _COMMAND_TIMEOUT = 30  # 秒
 _MAX_OUTPUT = 2000  # 字符
+
+
+def classify_command(command: str) -> tuple[str, str]:
+    """把命令分级，返回 (level, reason)，level ∈ {"blocked", "high", "safe"}。
+
+    设计原则是**默认拒绝**：只有明确命中只读白名单的命令才可无确认执行，
+    其余一律需要用户批准。这样新增一种解释器、或出现没预料到的执行方式时，
+    默认落到"需要确认"，而不是默认放行——安全判定的失误方向必须是保守的。
+
+    判定顺序本身就是安全语义，不要随意调换：
+
+      1. blocked —— 破坏性操作，直接拒绝，不留确认入口；
+      2. high    —— 显式高危模式（删除/移动/联网/注册表…）；
+      3. safe    —— 只读白名单：首词必须惰性 + 不含 shell 元字符 +
+                    不含会改变语义的选项（find -exec/-delete 等）；
+      4. high    —— 解释器 / 脚本执行入口；
+      5. high    —— 兜底默认拒绝。
+
+    为什么白名单要排在执行模式**之前**：`where python`、`type app.py` 的
+    **参数**里出现了 `python`、`.py`，但命令本身只读文件/查路径，不会执行
+    任何东西。若把执行模式放前面，这类命令会被误判成高危；过判会制造
+    "确认疲劳"——用户习惯性点通过之后，真正的护栏也一并失效了。所以先让
+    惰性首词短路返回，再用元字符 + 危险选项两道锁把边界收紧。
+    """
+    import re
+
+    stripped = command.strip()
+    for pat in _BLOCKED_PATTERNS:
+        if re.search(pat, command, re.IGNORECASE):
+            return "blocked", f"包含破坏性操作（{pat}）"
+    for pat in _HIGH_RISK_PATTERNS:
+        if re.search(pat, command, re.IGNORECASE):
+            return "high", f"命中高危模式（{pat}）"
+    lowered = stripped.lower()
+    if not (set(stripped) & _SAFE_FORBIDDEN_CHARS) and not any(
+        frag in lowered for frag in _SAFE_FORBIDDEN_SUBSTRINGS
+    ):
+        for pat in _SAFE_COMMAND_PATTERNS:
+            if re.search(pat, stripped, re.IGNORECASE):
+                return "safe", f"只读命令（{pat}）"
+    for pat in _EXEC_PATTERNS:
+        if re.search(pat, command, re.IGNORECASE):
+            return "high", f"会执行代码（命中 {pat}）"
+    return "high", "不在只读白名单内（默认按需确认处理）"
 
 
 @tool
@@ -493,23 +571,24 @@ def run_command(command: str, input_text: str = "", confirmed: bool = False) -> 
     # 可能含敏感参数的完整命令写进日志文件
     cmd_hash = hashlib.sha256(command.encode("utf-8")).hexdigest()[:16]
 
-    # 1. 黑名单硬拦截
-    for pat in _BLOCKED_PATTERNS:
-        if re.search(pat, command, re.IGNORECASE):
-            audit("run_command", command_hash=cmd_hash, command_preview=command[:120],
-                  blocked=True, reason="blocked_pattern", pattern=pat,
-                  duration_ms=int((time.time() - started) * 1000))
-            return f"⛔ 已拦截：命令包含破坏性操作（{pat}），禁止执行"
+    # 1. 分级判定：默认拒绝——只读白名单之外一律需要用户批准
+    level, reason = classify_command(command)
 
-    # 2. 高危命令需要确认
-    is_high_risk = any(re.search(p, command, re.IGNORECASE) for p in _HIGH_RISK_PATTERNS)
+    if level == "blocked":
+        audit("run_command", command_hash=cmd_hash, command_preview=command[:120],
+              blocked=True, reason="blocked_pattern", detail=reason,
+              duration_ms=int((time.time() - started) * 1000))
+        return f"⛔ 已拦截：命令{reason}，禁止执行"
+
+    # 2. 高危命令（含一切会执行代码的写法）需要确认
+    is_high_risk = level == "high"
     if is_high_risk:
         if not confirmed:
             audit("run_command", command_hash=cmd_hash, command_preview=command[:120],
-                  high_risk=True, outcome="need_confirm", approved=False,
+                  high_risk=True, outcome="need_confirm", approved=False, detail=reason,
                   duration_ms=int((time.time() - started) * 1000))
             return (
-                "NEED_CONFIRM 需要用户确认：高危命令 "
+                f"NEED_CONFIRM 需要用户确认：{reason}，命令 "
                 f"[{command}] 是否执行？请等待用户确认。"
             )
         # confirmed=True 必须命中后端批准登记（用户在前端确认后经 /api/approve 登记）
@@ -519,21 +598,24 @@ def run_command(command: str, input_text: str = "", confirmed: bool = False) -> 
         if not is_approved(command):
             audit("run_command", command_hash=cmd_hash, command_preview=command[:120],
                   high_risk=True, outcome="need_confirm", approved=False,
-                  reason="model_self_confirmed_without_approval",
+                  reason="model_self_confirmed_without_approval", detail=reason,
                   duration_ms=int((time.time() - started) * 1000))
             return (
-                "NEED_CONFIRM 未获用户批准：高危命令 "
+                f"NEED_CONFIRM 未获用户批准：{reason}，命令 "
                 f"[{command}] 没有对应的批准记录。请等待用户在前端确认。"
             )
 
     # 3. 执行（沙箱目录 + 超时 + 截断 + 标准输入）
     import os
 
-    # 风险说明（Codex 评审记录）：shell=True 把命令交给系统 shell 解析——
-    # 支持管道/通配符/环境变量等便捷语法，但也意味着黑名单正则不是安全边界：
-    # `python -c "..."` 等写法可绕过关键词匹配，真正的人为护栏是上方的高危
-    # 确认闸（approvals 一次性消费）+ 30s 超时强杀 + 限 WRITE_DIR 目录。
-    # 本项目定位单机个人开发辅助，不做沙箱隔离；若用于不受信环境请改为
+    # 风险说明（两轮外部评审记录）：shell=True 把命令交给系统 shell 解析——
+    # 支持管道/通配符/环境变量等便捷语法。**正则永远不是安全边界**：
+    # 第一轮评审发现旧实现靠"危险命令关键词"判定，于是「write_file 写脚本 +
+    # run_command 跑脚本」这条最顺手的路径整条漏过；现已改为默认拒绝
+    # （见 classify_command），并显式覆盖解释器/脚本执行入口。
+    # 但分类器仍只是启发式——真正的人为护栏是"默认需要用户批准"这个姿态本身
+    # + approvals 一次性消费 + 30s 超时强杀 + 限 WRITE_DIR 目录。
+    # 本项目定位单机个人开发辅助，**不做沙箱隔离**；若用于不受信环境请改为
     # 非 shell 参数列表执行或容器/虚拟机隔离（见 README 安全边界说明）。
     # 强制子进程 UTF-8 输出：Windows 下 Python 默认 GBK 输出中文，
     # 与 subprocess 的 utf-8 解码不一致会导致乱码

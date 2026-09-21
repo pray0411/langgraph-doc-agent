@@ -7,8 +7,78 @@
 
 ## [Unreleased]
 
+### Security（安全加固）
+
+本次加固的起因是一次外部代码评审。结论是：**上一轮的"安全防护"存在判定方向性错误** ——
+它拦的是"长得像危险命令的东西"，而不是"没被明确允许的东西"，于是护栏被本项目主推的
+用法绕开了。
+
+- **【P0】命令执行授权模型：关键词黑名单 → 默认拒绝（default-deny）**。新增
+  `tools.classify_command()`，把命令分成三层：`blocked`（破坏性操作，直接拒绝，不给
+  确认机会）/ `high`（需用户在前端确认）/ `safe`（只读白名单，免确认）。旧实现漏掉的
+  是**整类**写法而非个别词：`python script.py`、`python -c "import shutil; shutil.rmtree('x')"`
+  （`rmtree` 不含 `remove`）、`powershell -Command ...`、`node`、`bash` 全部不命中任何
+  规则 —— 于是「`write_file` 写脚本 → `run_command` 跑脚本」构成**零确认的任意代码
+  执行**，而这恰好是 README 主推的"写→跑→修"闭环。默认拒绝之后，新增解释器或出现
+  未预料的执行方式时，默认落到"需要确认"，失误方向变成保守的。
+- **【P0】`runterm`（交互终端）不再自己维护一份高危名单**，改为复用
+  `tools.classify_command`。此前两条路径各写一份判定，必然分叉 —— 出现"工具调用要确认、
+  终端里点 ▶ 却不要确认"的绕过口。
+- **【P0】来源校验重写：不再是 `Origin` 与 `Host` 互相比较**（新增 `_origin_ok()` 取代
+  `_csrf_ok()`）。旧写法看似严谨，实则**自己跟自己比**：`Host` 是请求方提供的，攻击者
+  可以同时控制 `Origin` 和 `Host`，一起伪造即可通过 —— 典型的 DNS rebinding 场景。
+  现在改为拿 `Origin` / `Host` 去和服务端**自己算出来的**本地身份集合（回环地址、本机名、
+  本机网卡 IP、`ALLOWED_ORIGINS`）比对；`Origin: null` 直接拒；无 `Origin` 时看
+  `Sec-Fetch-Site`。残留面（无任何来源信号的裸客户端放行）已在 README 中写明。
+- **【P1】`/api/config/test` 的 SSRF 面收敛**：该接口会把调用方给的 `base_url` 的响应体
+  回显给调用方，等于一个能读任意 HTTP 响应的探针。现显式拒绝云元数据地址
+  （`169.254.169.254` 等）与非 `http(s)` 协议。
+- **【P2】`server.py` 请求体上限**：超过上限返回 `413`（此前会被当作普通解析失败走
+  `400`，超大表单可以把内存打满）。
+- **【P1】`runterm` 资源上限**：会话数上限 8，输出队列上限 2000 行，单行输入上限 8192
+  字符；队列满时**丢弃最旧数据并上报 `dropped` 计数**，而不是无限堆积。此前
+  `spawn` 不受限 + 输出队列无界，属于可被远程（本机端口）触发的资源耗尽面。
+- **【P2】`/api/run/write` 的 TOCTOU 窗口**：创建父目录后**重新解析**目标路径再写入，
+  关闭"校验时不存在、写入时已成为符号链接"的窗口。
+- **【P2】`_build_sources` 来源卡片只显示第一篇文档**（外部评审指出的真实缺陷）：旧实现
+  取 `result[:300]` 作为每个卡片的预览、并在第一张卡片后 `break`，因此多文档检索结
+  果只会显示一张卡、且它的正文是**整体字符串的前 300 字符**（未必属于它自己）。现按
+  `[n]` 分块，每篇文档一张卡、预览取**该文档自己的 chunk**，并保留去重与数量上限。
+- **【P2】`config.py` 环境变量容错解析**：`int(os.getenv(...))` / `float(...)` 换成
+  `_env_int` / `_env_float`，`.env` 里写错一个字符（`TOP_K=3o`）不再于 import 阶段抛
+  `ValueError` 导致整个程序起不来，而是告警 + 用默认值。
+
+### Added（新增 · 本轮安全改造）
+
+- **`tests/test_security_model.py`**：把上面的安全承诺逐条钉成断言（共 15 条）。重点用例：
+  `test_classify_command_default_deny_table`（分级表）、`test_write_then_run_is_gated`
+  （复刻"写脚本 → 跑脚本"攻击链，含"模型自填 `confirmed=True` 也不放行"）、
+  `test_write_then_run_is_gated_at_http_layer`、`test_origin_rejects_dns_rebinding`、
+  `test_gateway_probe_rejects_metadata_and_bad_schemes`、`test_runterm_rejects_beyond_session_cap`、
+  `test_registered_tool_surface_matches_code_and_docs`（代码 / 注册列表 / README 三方一致）。
+  **为什么必须有这一层**：本次改造前"CSRF 防护"代码在、测试也在，但测试断言的是**漏洞
+  行为**（把 `Origin`==`Host` 当作正确）—— 承诺没有可执行的守护，就等于没有承诺。
+- **`retriever.semantic_disabled()` / `retriever.retrieval_mode()` 与 `DISABLE_SEMANTIC`
+  开关**：检索模式现在**可观测**。检索评估（`pytest -m eval`）固定跑纯 BM25 并在输出里
+  打印 `模式=bm25`，报告文件也带这一行。原因是改了"报指标不报模式"的旧习：README 曾挂出
+  `recall@3 = 1.00` 却没说明当时环境**根本没装** `sentence-transformers`，那些数字其实
+  是纯 BM25 的成绩被当成了"混合检索"的成绩；更实际的问题是装了 torch 的机器和没装的
+  机器会量到不同指标，同一个 commit 得出两个结论，门禁失去可比性。
+- **`tests/test_retrieval_eval.py::test_eval_is_pinned_to_bm25_mode`**：把"门禁钉在确定
+  的一条路径上"变成断言。
+
 ### Fixed（缺陷修复）
 
+- **测试断言了漏洞行为**：删除 `test_core.py` 中 `_csrf_*` 系列用例 —— 它们把
+  "`Origin` 与 `Host` 相等即放行"当作正确行为来断言，通过得越顺利，说明漏洞越稳固。
+  替换为 `test_origin_*` 系列（`Origin` 白名单式校验，含 DNS rebinding 与伪装域名用例）。
+- **`test_run_command_executes_normal_command` 名不副实**：它直接跑 `python -c`，在旧
+  实现下"能跑通"恰恰是漏洞本身。现改为经 `_approved_run` 走完整审批路径，并新增
+  `test_run_command_interpreter_requires_approval` 把"解释器必须审批"钉住。
+- **`where python` 被误判为高危**：默认拒绝改造中，执行模式扫描排在只读白名单之前，
+  导致参数里含 `python` 的只读命令（`where python`、`type app.py`）也要弹确认。过判
+  会训练出"确认疲劳"——用户习惯性点通过之后真护栏一起失效。已把白名单提前，并用
+  "shell 元字符 + 危险选项（`find -exec`/`-delete`）"两道锁补齐边界。
 - **测试套件密封性（P0）**：`tests/conftest.py` 新增 `_hermetic_dotenv`，测试期间把
   `dotenv.load_dotenv` 变为空操作。此前 `sys.modules.pop("config")` 触发的模块重导入会
   重新执行 `load_dotenv()`，把开发者本机 `.env` 里的真实 Key 灌回环境，导致隔离 fixture

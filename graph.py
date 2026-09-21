@@ -520,15 +520,25 @@ def _build_sources(tool_calls: list[dict]) -> list[dict]:
         result = str(call.get("result", ""))
         if name == "search_documents":
             # 结果格式: "[1] 来源: <path> | 相关度: 0.5\n<chunk>"
-            for line in result.split("\n"):
-                if "来源:" in line:
-                    title = line.split("来源:", 1)[1].split("|", 1)[0].strip()
-                    sources.append({
-                        "type": "document",
-                        "title": title,
-                        "preview": result[:300],
-                    })
-                    break
+            #
+            # 修的两个 bug（外部评审指出）：
+            # 1) 原实现在拿到第一条 "来源:" 后直接 `break`，于是每次
+            #    search_documents 只产出**一条**来源卡片——检索明明返回了 top_k 条；
+            # 2) 每条来源的 preview 都写成 `result[:300]`，也就是整段工具返回值
+            #    的前 300 字符，而不是该来源自己的片段。结果就是前端来源卡片里
+            #    多张卡片显示一模一样的预览文字，用户根本没法据此判断引用出处。
+            # 现在按 `[n]` 分块，逐块取自己的片段做预览。
+            for block in re.split(r"\[\d+\]", result)[1:]:
+                lines = [ln for ln in block.splitlines() if ln.strip()]
+                if not lines or "来源:" not in lines[0]:
+                    continue
+                title = lines[0].split("来源:", 1)[1].split("|", 1)[0].strip()
+                chunk = "\n".join(lines[1:]).strip()
+                sources.append({
+                    "type": "document",
+                    "title": title,
+                    "preview": (chunk or title)[:300],
+                })
         elif name == "web_search":
             # 结果格式: "[1] <title>\n   摘要: ...\n   链接: <url>"
             blocks = re.split(r"\[\d+\]", result)

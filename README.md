@@ -1,8 +1,12 @@
-# Pray：通用 AI Agent（LangGraph ReAct）
+# Pray：ReAct 文档 / 代码助手（LangGraph）
 
-基于 [LangGraph](https://github.com/langchain-ai/langgraph) 构建的**通用 AI Agent**——**Pray**，能够回答任何问题：文档问答、联网搜索实时信息（天气/新闻）、普通对话，全部由**模型自主决策**调用工具完成。
+基于 [LangGraph](https://github.com/langchain-ai/langgraph) 构建的**本地单体 Agent**——**Pray**。做法是把一组工具交给模型，由模型自主决定何时调用什么（ReAct / Tool-calling），覆盖：文档问答（RAG）、联网搜索、代码落盘与运行验证、服务端会话记忆与跨会话长期记忆。
 
-> 从"专用文档问答 Agent"升级而来。核心变化：不再用规则判断"该走哪条路"，而是把工具交给模型，由模型自主决定何时调用什么工具（ReAct / Tool-calling 架构，LangGraph 最主流的 Agent 模式）。
+> **先说清楚它能做什么、不能做什么**：在**已建索引的文档范围**内问答、按需联网取实时信息、以及"写代码 → 落盘 → 运行 → 看报错 → 改"的本地闭环，这几条是实测过的路径。它**不是**"什么都能问"的通用助手 —— 索引外的领域会答不上来（应当承认答不上来），长链路多步规划、需要真沙箱隔离的执行型任务都超出当前设计范围。
+>
+> **关于仓库名**：仓库叫 `langgraph-doc-agent`，是项目最初的定位（专用文档问答）；后来演进为 ReAct 通用 Agent，应用名定为 **Pray**。名字里的 "doc" 已无法概括现状，保留旧名只是不想让外部链接（fork / star / 已发布的镜像地址）失效。
+
+> 演进要点：不再用规则判断"该走哪条路"，而是把工具交给模型自主选择 —— 这是 LangGraph 最主流的 Agent 模式，也是本项目与"if 关键词 → 走检索分支"式实现的根本区别。
 
 [![CI](https://github.com/pray0411/langgraph-doc-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/pray0411/langgraph-doc-agent/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -18,13 +22,22 @@
 | 能力 | 工具 | 示例 |
 |---|---|---|
 | 📄 文档问答（RAG） | `search_documents` | "项目的核心架构是什么？" |
-| 🌤️ 实时天气 | `get_weather` | "今天北京的天气怎么样？" |
 | 🔍 联网搜索 | `web_search` | "最近有什么 AI 新闻？" |
+| 🌤️ 实时天气 | `get_weather` | "今天北京的天气怎么样？" |
+| 🕒 当前时间 | `get_current_time` | "现在几点？"（读系统时间，不受模型知识截止限制） |
 | 💾 代码落盘 | `write_file` | "写一个猜数字游戏"（AI 主动落盘） |
+| 📖 读文件 | `read_file` | "看看 generated/app.py 的前 50 行" |
+| ✏️ 局部改文件 | `edit_file` | "把第 12 行的超时从 10 改成 30" |
+| 📂 列目录 | `list_files` | "generated/ 下有哪些文件？" |
 | ▶️ 命令执行 | `run_command` | "运行 calculator.py 验证"（写→跑→修闭环） |
 | 🌐 打开浏览器 | `open_in_browser` | "做个扫雷游戏"（自动生成 HTML 并打开） |
-| 📖 网页抓取 | `fetch_url` | "锐评这个 GitHub 项目"（白名单只读抓取 README/元数据） |
-| 💬 普通对话 | （直答） | "你好，你是谁？" |
+| 📡 网页抓取 | `fetch_url` | "锐评这个 GitHub 项目"（白名单只读抓取 README/元数据） |
+| 🧠 长期记忆 | `remember` / `forget` | "记住我习惯用中文" / "忘掉这条" |
+| 💬 普通对话 | （直答，不调工具） | "你好，你是谁？" |
+
+> 上表就是**全部**注册给模型的工具（共 13 个，见 `graph.py` 的 `create_agent(tools=[...])`）——
+> 不再只列其中几个。核对方式：`grep -c '^@tool' tools.py` 与 `graph.py` 的工具列表应一致；
+> `tests/test_security_model.py` 里有对应的一致性断言。
 
 > **网页抓取**：`fetch_url` 用于读取 GitHub 仓库真实内容（锐评/分析项目场景）。
 > 只读安全设计：仅允许 `github.com` / `api.github.com` / `raw.githubusercontent.com`
@@ -35,24 +48,42 @@
 > 目录（`WRITE_DIR` 可配置）。安全边界：只允许写入该目录内，`../` 逃逸与
 > 绝对路径会被拒绝，父目录自动创建。
 >
-> **命令执行**：AI 写完代码后**主动运行验证**（`python xxx.py`）。安全防护：
-> - 破坏性命令（`rm -rf /`、`format`、`shutdown` 等）**黑名单拦截**
-> - 高危命令（删除/移动/安装包/联网下载等）**需前端确认**后才执行
->   （工具返回 NEED_CONFIRM → 界面弹窗 → 确认后续问）
+> **命令执行**：AI 写完代码后**主动运行验证**（`python xxx.py`）。这里的安全模型是
+> **默认拒绝（default-deny）**，不是关键词黑名单：
+> - **第 1 层 · 直接拒绝**：破坏性操作（`rm -rf /`、`format`、`shutdown`、`mkfs`）
+>   当场拒绝，连确认机会都不给
+> - **第 2 层 · 需用户确认**：其余命令一律要**在前端点确认**才执行 —— 包括
+>   `python xxx.py`、`python -c "..."`、`powershell -Command ...`、`node`、`bash`
+>   等**任何能执行任意代码的写法**（工具返回 NEED_CONFIRM → 界面弹窗 → 确认后才跑）
+> - **第 3 层 · 只读白名单**：仅 `dir` / `ls` / `type` / `cat` / `findstr` / `find` /
+>   `where` / `which` / `pwd` / `echo` 这些明确无副作用的命令可免确认，且必须同时
+>   满足「不含 shell 元字符（管道、`&&`、`;`、重定向、反引号、`$`、`%`、`^`）」与
+>   「不含危险选项（`find -exec` / `-delete` 等）」
 > - 只在 `generated/` 目录内执行；30 秒超时强杀；输出截断 2000 字符
 >
-> ⚠️ **安全边界说明（请务必阅读）**：黑名单是**尽力而为的关键词启发式**，不是
-> 沙箱隔离——`python -c "import os; os.remove(...)"` 这类写法可以绕过黑名单，
-> 但会被"高危命令需确认"的门槛拦住（`remove` 命中高危规则）。**真正的人为护栏是
-> 确认弹窗与超时强杀，而非黑名单本身**。因此**不要**在共享/生产/含敏感数据的环境
-> 直接对外暴露本服务：请运行在专用隔离环境（Docker/虚拟机），以普通用户而非 root
-> 运行，并配合 `API_TOKEN` 鉴权与网络访问控制。本项目的命令执行设计定位是
-> **单机个人开发辅助**，不是安全边界。
+> ⚠️ **为什么白名单要反过来写（本次改造的核心）**：旧实现是黑名单 —— 列一堆"长得像
+> 危险命令"的关键词（`rm` / `del` / `move` / `pip install`…），不在名单里就放行。它
+> 的致命缺陷不是"漏了几个词"，而是**判定方向反了**：`python script.py` 不含任何
+> 关键词，于是「`write_file` 写脚本 → `run_command` 跑脚本」这条**零确认的任意代码
+> 执行**路径，恰好就是本项目 README 主推的用法 —— 护栏被自家主推姿势绕开。现在改成
+> 默认拒绝：新增一种解释器、或出现没预料到的执行方式时默认落到"需要确认"，失误方向
+> 是保守的。（`where python` 这类只读命令曾因参数里含 `python` 被误判，过判会训练出
+> "确认疲劳"，所以白名单的执行模式判定顺序也一并修正了。）
+>
+> ⚠️ **安全边界说明（请务必阅读）**：以上三层是**应用层判定**，不是沙箱隔离。已被
+> 批准执行的代码，在操作系统看来就是普通子进程，能读写该用户有权限访问的一切。
+> **真正的人为护栏是确认弹窗 + 目录边界 + 超时强杀，不是分类器本身。** 因此**不要**
+> 在共享 / 生产 / 含敏感数据的环境直接对外暴露本服务：请运行在专用隔离环境
+> （Docker / 虚拟机），以普通用户而非 root 运行，并配合 `API_TOKEN` 鉴权与网络访问
+> 控制。本项目的命令执行定位是**单机个人开发辅助**，不是安全边界。
+> 尚未做的加固（不隐瞒）：子进程 CPU / 内存 / 进程数限制、一次性容器、子进程级断网。
 
 > **🖥 交互终端**：代码块「▶ 运行」支持所有可执行语言——HTML 在 iframe 中运行，
 > Python/JS/Shell 在**交互终端**中运行（真实 stdin/stdout：程序输出实时显示，
 > 你在输入框打字即可操作程序）。终端弹窗由 `/api/run/start|input|output|stop`
-> 驱动（子进程 + 轮询），复用黑名单安全校验，关闭弹窗自动终止进程。
+> 驱动（子进程 + 轮询），**复用同一套 `classify_command` 判定**（不会出现"工具路径
+> 要确认、终端路径不用确认"的分叉），关闭弹窗自动终止进程；会话数上限 8、单行输入
+> 上限 8192 字符，输出缓冲满时丢弃最旧数据而不是无限堆积。
 
 ## 快速开始
 
@@ -95,10 +126,17 @@ python -X utf8 main.py web
 │    思考(Reason) → 行动(Act/调工具)      │
 │    → 观察(Observe) → 再思考 → ...      │
 │                                         │
-│  工具集：                               │
-│    search_documents  (本地文档 RAG)     │
-│    get_weather        (实时天气)        │
-│    web_search         (联网搜索)        │
+│  工具集（共 13 个）：                     │
+│    search_documents  本地文档 RAG        │
+│    web_search        联网搜索            │
+│    get_weather       实时天气            │
+│    get_current_time  当前时间            │
+│    read_file / list_files / edit_file   │
+│    write_file        代码落盘（沙箱目录） │
+│    run_command       命令执行（需确认）   │
+│    open_in_browser   打开浏览器          │
+│    fetch_url         白名单只读抓取      │
+│    remember / forget 跨会话长期记忆      │
 └─────────────────────────────────────────┘
    │
    ▼
@@ -109,6 +147,9 @@ python -X utf8 main.py web
 - 问天气 → 调 `get_weather`
 - 问文档 → 调 `search_documents`
 - 问实时信息 → 调 `web_search`
+- 要看已有代码 → 调 `read_file` / `list_files`
+- 要改已有代码 → 调 `edit_file`（局部替换，不是整文件重写）
+- 写代码类任务 → `write_file` 落盘，再 `run_command` 运行验证（**这一步会弹确认框**）
 - 普通聊天 → 直接回答，不调工具
 - 复杂任务 → 连续调用多个工具
 
@@ -124,6 +165,21 @@ python -X utf8 main.py web
 - **降级**：embedding 模型不可用（未安装/加载失败）时自动回退纯 BM25，功能不中断
 - **缓存**：检索结果按 (查询, 索引版本) 内存缓存，索引重建自动失效
 - **索引**：JSON 文件带版本号（V3），旧格式首次启动自动重建（`python main.py build` 可强制重建）
+- **手动关闭语义通道**：`DISABLE_SEMANTIC=1`（跑评估与 CI 时用，见下）
+
+> ⚠️ **"混合检索"要看依赖是否真的装上 —— 这一点必须说清楚**：`sentence-transformers`
+> 在 `requirements.txt` 里（默认安装，会连带拉 torch），但**它不在就是不在**，此时
+> 检索会**静默地**退化为纯 BM25，日志只留一行 warning，功能一切正常。
+> 因此：
+> - 想确认当前进程实际用的哪条路径：`retriever.retrieval_mode()` 返回
+>   `"hybrid"` 或 `"bm25"`；
+> - **报指标时必须同时报模式**。本仓库检索评估（`pytest -m eval`）固定跑**纯 BM25**
+>   （`tests/test_retrieval_eval.py` 里钉死 `DISABLE_SEMANTIC=1`），打印形如
+>   `[检索评估] 模式=bm25 25 条查询`。写这一条的直接原因：改造前 README 直接挂出
+>   "recall@3 = 1.00"，却没有说明当时本机**根本没装** `sentence-transformers` ——
+>   那个数字是纯 BM25 的成绩，被当成混合检索的成绩展示了出去。
+> - 混合检索的收益要**单独量**：装好依赖后跑同一套评估集对比，并把两组数字与模式
+>   一起给出。在此之前，本项目不主张"混合检索更好"这个结论。
 
 > ⚠️ **首次文档问答会稍慢**：语义模型首次加载需要下载权重（约 470MB，下载后缓存到 `models/`）；
 > 网络不可用时自动回退纯 BM25，不影响使用。
@@ -174,20 +230,56 @@ system prompt 约束（规则）。
   自动按回答文本长度估算并标注"（估算）"
 - 成本估算仅供参考，非账单
 
-## 安全（API Token，可选）
+## 安全：鉴权、来源校验与已知残留面
+
+**一句话总结**：本服务默认**只监听 127.0.0.1 且不带鉴权**，定位是单机个人工具。
+下面把三道防护与**没防住的地方**都写清楚，而不是只报"已加固"。
+
+### 1. API Token（可选，默认关闭）
 
 `.env` 配置 `API_TOKEN=xxx` 后，`/ask`、`/ask/stream`、`/api/mode`、`/api/config`、
 `/api/sessions` 均要求请求头 `X-API-Token: xxx`，防止本机端口被局域网/他人滥用
-（防止盗用 API 额度）。未配置时保持零配置开放（默认绑定 127.0.0.1）。
-前端在 ⚙ 设置面板填入 Token 后存入浏览器 localStorage。
+（防止盗用 API 额度）。前端在 ⚙ 设置面板填入 Token 后存入浏览器 localStorage。
 
-> **CSRF 防护**：所有带副作用的请求（POST/DELETE/PUT/PATCH）都会校验 `Origin`
-> 请求头，仅允许本机 `127.0.0.1` / `localhost` 来源（非浏览器客户端无 Origin 时放行），
-> 防止恶意网页借浏览器跨站调用本服务。
+> ⚠️ **未配置 `API_TOKEN` 时服务是开放的**（仅靠绑定 127.0.0.1 收敛暴露面）。
+> 若要放到任何多用户/共享机器上，**必须**设置 `API_TOKEN`。不要把它理解成"默认安全"。
+
+### 2. 来源校验（防 CSRF / DNS rebinding）
+
+所有带副作用的请求（POST / DELETE / PUT / PATCH）以及 `GET /api/open` 都会先过
+`_origin_ok()`，放行规则按顺序：
+
+1. 携带了**已配置且正确**的 `X-API-Token` → 放行（显式凭据不是"环境凭据"，浏览器
+   不会替你带上这个头，CSRF 威胁模型不适用）；
+2. `Host` 头若不是**服务端自己认识的本地身份**（回环地址、本机名、本机网卡 IP、
+   `ALLOWED_ORIGINS`）→ 拒绝。这道不依赖浏览器行为，是覆盖面最广的一道；
+3. 有 `Origin` → 其 hostname 必须在同一份"本地身份集合"内；
+4. 无 `Origin` → 看 `Sec-Fetch-Site`，显式标记 `cross-site` 则拒绝。
+
+> **为什么不用"`Origin` 与 `Host` 相等"这种常见写法**：`Host` 是请求方提供的，
+> 攻击者可以同时控制 `Origin` 与 `Host`，两边一起伪造就能通过比较 —— 这种"自己跟
+> 自己比"的校验等于没有校验。这里改成拿 `Origin`/`Host` 去和**服务端自己算出来的
+> 本地身份集合**比，攻击者控制不了那一侧。
+>
+> **残留面（不隐瞒）**：既没有 `Origin` 也没有 `Sec-Fetch-Site` 的请求会被放行
+> —— 这是为了 `curl` 等非浏览器客户端可用。现代浏览器发起跨站请求时至少会带其中
+> 一个，所以实际可利用面很窄，但它是**存在的**：能构造原始 HTTP 请求的本机进程
+> 可以绕过来源校验（对本机进程而言本来也无意义）。需要更严时请开启 `API_TOKEN`。
+
+### 3. 其他收敛项
+
+- **网关自检不允许当 SSRF 跳板**：`/api/config/test` 会请求调用方给的 `base_url`
+  并回显响应体，因此显式拒绝云元数据地址（`169.254.169.254` 等）与非 `http(s)`
+  协议，只允许指向本机/内网网关；
+- **请求体大小上限**：超过上限直接返回 `413`，避免超大表单把内存打满；
+- **目录边界**：`write_file` / `run_command` 被限制在 `WRITE_DIR` 内，`../` 逃逸与
+  绝对路径被拒；`/api/run/write` 在创建父目录后**重新解析**目标路径，关闭
+  "先校验后创建"的 TOCTOU 窗口。
 
 > ⚠️ **超时语义说明**：`/ask` 超时（默认 60 秒）后立即返回 504，但**模型调用无法被
 > 取消**——请求仍在后台线程继续执行并消耗额度。这是 Python 线程模型的限制，如需严格
-> 取消请改用 asyncio 或子进程隔离。
+> 取消请改用 asyncio 或子进程隔离。同理，反复触发超时会让后台线程与额度持续累积，
+> 这是当前已知的、尚未解决的资源面。
 
 ## 反思（reflection）
 
@@ -202,18 +294,21 @@ system prompt 约束（规则）。
 langgraph-doc-agent/
 ├── graph.py         # ★ 核心：langchain create_agent 通用 Agent + 反思逻辑 + checkpointer 会话记忆 + 全局记忆注入
 ├── memory.py        # 全局记忆（SQLite profile 表，跨会话长期记忆，模型可 remember/forget）
-├── tools.py         # 工具集：search_documents / web_search / get_weather / write_file / run_command / open_in_browser / fetch_url
-├── retriever.py     # jieba+BM25 + embedding 语义的 RRF 混合检索
-├── server.py        # 网页服务（并发安全、请求超时、API Token 鉴权）
+├── tools.py         # 工具集（13 个）：search_documents / web_search / get_weather / get_current_time
+│                    #   / write_file / read_file / list_files / edit_file / run_command
+│                    #   / open_in_browser / fetch_url / remember / forget
+│                    #   + classify_command()：默认拒绝的命令分级（run_command 与 runterm 共用）
+├── retriever.py     # jieba+BM25 + embedding 语义的 RRF 混合检索（retrieval_mode() 报告实际通道）
+├── server.py        # 网页服务（来源校验 / 请求体上限 / API Token 鉴权 / SSRF 收敛）
 ├── mcp_server.py    # MCP Server：把 Pray 暴露给 Claude Desktop 等 MCP 客户端
 ├── desktop.py       # 桌面端：pywebview 内嵌系统 WebView 加载本地 UI
-├── runterm.py       # 交互终端会话（子进程管理：启动/输入/输出/停止）
+├── runterm.py       # 交互终端会话（子进程管理：启动/输入/输出/停止 + 会话数与缓冲上限）
 ├── main.py          # 命令行入口
-├── config.py        # 配置（运行时 provider 动态切换、记忆/检索/鉴权配置）
+├── config.py        # 配置（运行时 provider 动态切换、记忆/检索/鉴权配置、环境变量容错解析）
 ├── approvals.py     # 高危命令审批登记（一次性消费 + 5 分钟 TTL）
 ├── logging_setup.py # 结构化日志 + 安全审计日志（凭据脱敏）
 ├── legacy/          # V1 历史存档（graph_v1.py / llm.py），不参与运行
-├── tests/           # 测试（含元测试 / 契约 / 集成 / 评估 / E2E / 性能分层）
+├── tests/           # 测试（含元测试 / 安全模型 / 契约 / 集成 / 评估 / E2E / 性能分层）
 ├── VERSION          # 版本号单一来源（config.APP_VERSION、pyproject 均引用它）
 ├── pyproject.toml   # 统一配置：pytest / coverage / ruff / mutmut
 ├── Dockerfile       # 隔离运行环境（非 root 用户 + 健康检查）
@@ -319,15 +414,21 @@ pip-audit -r requirements.txt --desc
 | 层 | 位置 | 说明 |
 |---|---|---|
 | 元测试 | `tests/test_metatest.py` | **测试套件自检**：同名用例、环境密封性、自证式用例、版本号单一来源、CI 配置有效性 —— 用测试守护测试本身 |
-| 单元 | `tests/test_core.py` | 纯函数与模块级行为（检索、记忆、反思、成本估算） |
+| 安全模型 | `tests/test_security_model.py` | **把安全承诺写成断言**：默认拒绝的命令分级表、写→跑必须被拦、DNS rebinding 拒绝、SSRF 目标收敛、会话数上限、413、工具面三方一致 |
+| 单元 | `tests/test_core.py` | 纯函数与模块级行为（检索、记忆、反思、成本估算、命令分级） |
 | 契约 | `tests/test_server_writes.py` | 真实 HTTP 打写接口：上传/删除/改名/重建索引/审批/命令执行 |
 | 集成 | `tests/test_agent_loop.py` | **本地假 OpenAI 兼容服务**驱动真实 ReAct 工具循环（不联网、不花钱、确定性） |
 | 多 provider | `tests/test_provider_contract.py` | 6 个 provider 的配置解析 + 请求构造契约（不真调 API） |
-| 质量评估 | `tests/test_retrieval_eval.py` | recall@3 / MRR 带阈值门禁 |
+| 质量评估 | `tests/test_retrieval_eval.py` | recall@3 / MRR 带阈值门禁（**固定纯 BM25**，报告带模式标签） |
 | 前端 E2E | `tests/e2e/` | Playwright 金路径 + XSS 注入 + 畸形 Markdown |
 | 性能基线 | `tests/test_perf.py` | 检索 P95 / SSE 首字 / 并发检索 |
 | CLI | `tests/test_cli.py` | 命令行入口与参数校验 |
 | 日志审计 | `tests/test_logging_audit.py` | 结构化日志 + 凭据脱敏审计 |
+
+> **安全承诺必须是可执行的**：上面这些修复如果只写在 README 里，下一次改动就会悄悄
+> 退回去（本次改造前的"CSRF 校验"正是如此 —— 代码在、测试在，但测试断言的是**漏洞
+> 行为**）。`test_security_model.py` 的定位就是把每一条承诺钉成断言，尤其是那条
+> `test_write_then_run_is_gated`：它直接复刻"写脚本 → 跑脚本"的攻击链。
 
 ### 这套测试怎么做到"密封"
 
@@ -347,18 +448,27 @@ pip-audit -r requirements.txt --desc
 
 ### 覆盖率：现状与**已知缺口**（主动披露）
 
-当前实测（`pytest --cov=. --cov-branch`）**总覆盖率约 80%**，门禁卡在 70%。但更需要
-说清楚的是**哪些地方没有被覆盖**，而不是一个总数：
+当前实测（`pytest tests --cov=. --cov-branch`，**273 条用例全绿、退出码 0**）**总覆盖率 80%**
+（语句 2518 / 未覆盖 460，分支 802 / 部分覆盖 121），门禁卡在 70%。但更需要说清楚的是
+**哪些地方没有被覆盖**，而不是一个总数：
 
 | 模块 | 覆盖率 | 缺口说明 |
 |---|---|---|
-| `server.py` | ~67% | 读接口与写接口主体已覆盖；**未覆盖**：会话导出（`/api/sessions/{id}/export`）、配置热更新 `/api/config` 的完整校验分支、`/api/mode` 的 ollama 可用性探测 |
-| `graph.py` | ~87% | `_build_sources`/`_grounded`/`_estimate_cost` 等纯函数覆盖充分；**未覆盖**：部分流式异常分支与 recursion limit 边界 |
-| `tools.py` | ~78% | `fetch_url` 白名单/重定向/超限分支、`write_file` 的部分 OSError 分支 |
-| `mcp_server.py` | ~75% | stdio/HTTP 双模式的进程级启动未覆盖（需真起 MCP 客户端） |
-| `retriever.py` | ~87% | jieba 缺失时的 bigram 降级、语义编码器异常路径 |
-| `static/index.html` | 由 E2E 覆盖 | 1582 行自写渲染器；E2E 覆盖金路径 + XSS/畸形输入，**未覆盖**：代码块执行、设置面板、上传 UI |
+| `server.py` | 70% | 读接口与写接口主体已覆盖；**未覆盖**：会话导出（`/api/sessions/{id}/export`）、配置热更新 `/api/config` 的完整校验分支、`/api/mode` 的 ollama 可用性探测、SSE 与流式异常分支 |
+| `tools.py` | 79% | `fetch_url` 白名单 / 重定向 / 超限分支（`785-808`）、`run_command` 的失败与交互分支（`636-663`）、`_bocha_search` 真调用 |
+| `retriever.py` | 86% | jieba 缺失时的 bigram 降级、语义编码器异常路径、索引损坏重建分支 |
+| `graph.py` | 87% | `_build_sources` / `_grounded` / `_estimate_cost` 等纯函数覆盖充分；**未覆盖**：部分流式异常分支与 recursion limit 边界 |
+| `runterm.py` | 85% | 补上了会话数上限与队列溢出路径；**未覆盖**：进程被杀后的回收分支 |
+| `approvals.py` | 82% | TTL 过期清理的并发路径 |
+| `config.py` | 98% | 只剩 `8-9` 行 |
+| `memory.py` / `logging_setup.py` | 93% / 91% | SQLite 异常路径、日志轮转边界 |
+| `mcp_server.py` | 75% | stdio / HTTP 双模式的进程级启动未覆盖（需真起 MCP 客户端） |
+| `static/index.html` | 由 E2E 覆盖 | 单文件自写渲染器；E2E 覆盖金路径 + XSS / 畸形输入，**未覆盖**：代码块执行、设置面板、上传 UI |
 | `desktop.py` | 0%（omitted） | pywebview 窗口需真实 GUI，故排除在统计外 |
+
+> **注意这几个数字的边界**：它们是**在没装 `sentence-transformers` 的环境**下测得的
+> （语义相关代码走的是降级分支）。装了 torch 的机器上 `retriever.py` 的分支覆盖会不同 ——
+> 这正是"覆盖率不可跨环境直接比较"的实例，也是为什么评估指标必须带模式标签。
 
 > 之所以把缺口写出来：报一个 80% 却不说缺在哪，等于让对方自己去发现这些洞 ——
 > 那时信任就崩了。**覆盖率回答"代码有没有被执行"，变异测试才回答"测试能不能抓住
@@ -370,11 +480,28 @@ pip-audit -r requirements.txt --desc
 - [ ] **前端 E2E 首跑需人工确认一次**：用例与独立 CI job 已就位，但选择器依赖当前
   前端 DOM（`#question` / `#askBtn` / `.answer-body` / `.sources .source-card`）。
   首次在 CI 跑通后建议固定下来；改动前端结构时记得同步。
-- [ ] **命令执行未做真沙箱**（C7）：目前是"黑名单启发式 + 高危确认 + 超时强杀 +
-  目录边界"，不是隔离。计划：子进程 CPU/内存/进程数限制，高危命令走一次性 Docker
-  容器，可选关闭子进程网络。
+- [ ] **命令执行仍未做真沙箱**（C7）：现在是"**默认拒绝的分级判定** + 用户确认 + 超时
+  强杀 + 目录边界 + 会话/缓冲上限"，比旧的黑名单强，但**依然是应用层判定，不是隔离**。
+  计划：子进程 CPU / 内存 / 进程数限制，高危命令走一次性 Docker 容器，可选关闭子进程
+  网络。在那之前，别把它当安全边界用（见上文「安全边界说明」）。
 - [ ] **工具生态扩展**（C8）：表格读写（CSV/Excel）、Python 沙箱执行、正文提取式
-  抓取、cross-encoder rerank（直接用 C1 的指标衡量收益）。
+  抓取、**cross-encoder rerank**（按上面的要求，落地时必须给出"纯 BM25 / 混合 / 加重排"
+  三组指标与各自的模式标签）。
+- [ ] **PDF / DOCX 解析**：目前只吃 `.md/.txt/.py/.rst/.html`，PDF 与 Word 文档需要
+  额外解析依赖，尚未支持。
+- [ ] **`/ask` 超时后无法取消后台调用**：超时返回 504 后线程继续跑并继续消耗额度，
+  反复触发会累积线程与费用。需要 asyncio 或子进程隔离才能真正取消。
+- [ ] **全局状态竞争的收敛**：`set_mode` / `set_runtime_provider_config` 直接改模块级
+  状态，多请求并发时存在"改到一半被读到"的窗口。计划改为快照语义（请求开始时取一次
+  配置快照）。同理，会话 checkpointer 的无限增长与 `list_sessions` 的全量物化也需要
+  加上限。
+- [ ] **前端 XSS 加固与单文件膨胀**：`static/index.html` 里自写的 Markdown 渲染器
+  目前靠转义白名单，建议接入 DOMPurify 做二次净化；单文件已过大，考虑拆分。
+- [ ] **内容治理**：`write_file` 目前是**直接覆盖**，没有版本、没有 diff、覆盖前不提示。
+  代码类场景下"模型改坏了上一个版本"是不可恢复的，需要补版本快照或二次确认。
+- [ ] **真模型夜间冒烟**：现在的集成测试全部用本地假 OpenAI 服务（这是对的，为了
+  确定性），但缺少一个"定期用真模型跑一遍主链路"的 job，用来发现 prompt / 工具
+  schema 与服务商真实行为的不一致。
 - [ ] **会话管理**（C5）：导出目前支持 markdown/json，待补重命名与游标分页。
 - [ ] **OpenAPI + 属性测试**（B8）：给 `/api/*` 补 OpenAPI 定义，用 `schemathesis`
   自动生成畸形请求打接口。
