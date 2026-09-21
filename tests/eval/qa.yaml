@@ -1,0 +1,170 @@
+# 检索质量评估集（recall@k / MRR）
+#
+# 为什么需要它：在这个文件出现之前，RAG「好不好」是**完全无法回归**的。
+# 改一个 top_k、换一次分词器、调整 RRF 的 k 值，没有任何东西会告诉你
+# 检索质量是变好了还是变坏了 —— 只能靠"随便试几个问题，感觉还行"。
+# 这对一个以文档问答为核心能力的项目来说，是最要命的空白。
+#
+# 现在它变成可计算的指标：recall@1/@3/@5 与 MRR，跌破阈值即失败。
+# 于是一句"我换了个分词策略"，会变成"recall@3 从 1.00 保持、MRR 从 0.79 升到 0.83"。
+#
+# ---
+# 使用说明
+#
+# 语料在 tests/eval/corpus/ 下，是**自带的自包含语料**，与仓库 docs/ 解耦。
+# 这样做的理由：评估集必须稳定可复现。如果用 docs/ 做语料，那么任何人改一次
+# 项目文档，评估基线就会漂移，指标失去可比性。
+#
+# 每条 query 的 `expected` 是**应当被命中的语料文件名**。
+# `note` 说明这条在考察什么能力，便于失败时快速定位是"哪一类问题退化了"。
+#
+# ---
+# 阈值怎么定
+#
+# 定阈值的原则是"贴着当前真实水平，留一点波动余量"，而不是"理想值"，
+# 也不是"随便一个不会红的数"：
+#   - 定 1.00 会让任何一次合理改动都变红，最后大家把检查关掉 —— 门禁变成摆设；
+#   - 定 0.50 则什么都抓不到 —— 检索彻底坏掉才报警，等于没有门禁。
+#
+# 当前实测（25 条查询，纯 BM25，无向量通道）：
+#   recall@1 = 0.96、recall@3 = 1.00、recall@5 = 1.00、MRR = 0.98
+# 因此取 recall@3 >= 0.95、MRR >= 0.85：允许 1 条查询波动，
+# 但只要出现明显退化（例如分词策略改坏、top_k 调错、RRF 参数写反）就会红。
+
+thresholds:
+  recall_at_3: 0.95
+  mrr: 0.85
+
+queries:
+  # ---------- architecture.md ----------
+  - id: q01
+    question: 状态图里有哪些主要节点
+    expected: architecture.md
+    note: 直接词汇匹配（节点名）
+
+  - id: q02
+    question: 会话状态由什么组件持久化，怎么区分不同会话
+    expected: architecture.md
+    note: 需要把"会话状态"关联到 checkpointer 与 thread_id
+
+  - id: q03
+    question: 为什么统计本轮工具调用前必须先切分消息
+    expected: architecture.md
+    note: 考察对"累积历史"这一坑的理解
+
+  - id: q04
+    question: 模型陷入无限工具循环时怎么止损
+    expected: architecture.md
+    note: 递归上限 / 可读提示
+
+  # ---------- retrieval.md ----------
+  - id: q05
+    question: 中文文本是怎么分词的
+    expected: retrieval.md
+    note: jieba；分词器缺失时的降级
+
+  - id: q06
+    question: 两个检索通道的结果是怎么融合的
+    expected: retrieval.md
+    note: RRF；以及为什么不直接相加
+
+  - id: q07
+    question: 语义检索不可用时会怎样
+    expected: retrieval.md
+    note: 降级路径（评估集必须覆盖降级，否则降级质量无人看管）
+
+  - id: q08
+    question: 检索缓存满了以后怎么淘汰
+    expected: retrieval.md
+    note: LRU 逐条淘汰 vs 整体清空
+
+  - id: q09
+    question: 余弦相似度低于多少会被排除
+    expected: retrieval.md
+    note: 具体阈值 0.2
+
+  # ---------- security.md ----------
+  - id: q10
+    question: 命令黑名单能当作安全边界吗
+    expected: security.md
+    note: 考察"启发式不是边界"这一结论
+
+  - id: q11
+    question: 高危命令批准凭据能不能重复使用
+    expected: security.md
+    note: 一次性 + 有效期
+
+  - id: q12
+    question: 文件路径逃逸是怎么防的
+    expected: security.md
+    note: 真实路径解析 vs 字符串前缀
+
+  # ---------- deployment.md ----------
+  - id: q13
+    question: 服务默认监听哪个地址和端口
+    expected: deployment.md
+    note: 127.0.0.1:8000
+
+  - id: q14
+    question: 怎么把模型请求指向自建的兼容网关
+    expected: deployment.md
+    note: LLM_BASE_URL 的优先级
+
+  - id: q15
+    question: 容器里为什么不用 root 运行
+    expected: deployment.md
+    note: 安全定位与隔离环境
+
+  # ---------- testing.md ----------
+  - id: q16
+    question: 为什么测试里还要屏蔽代理
+    expected: testing.md
+    note: 注册表代理；最隐蔽的一条
+
+  - id: q17
+    question: 怎么确定性地测试工具调用循环
+    expected: testing.md
+    note: 本地假模型服务
+
+  - id: q18
+    question: 同名测试函数会有什么后果
+    expected: testing.md
+    note: 元测试；静默覆盖
+
+  # ---------- memory.md ----------
+  - id: q19
+    question: 会话记忆和全局记忆有什么区别
+    expected: memory.md
+    note: 两层记忆的职责边界
+
+  - id: q20
+    question: 长期记忆为什么不用向量检索存
+    expected: memory.md
+    note: 精确事实 vs 模糊回忆的取舍
+
+  # ---------- tools.md ----------
+  - id: q21
+    question: 抓取网页的工具限制在哪些域名
+    expected: tools.md
+    note: 白名单
+
+  - id: q22
+    question: 命令执行的标准输出和错误是混在一起返回吗
+    expected: tools.md
+    note: 分流返回
+
+  # ---------- frontend.md ----------
+  - id: q23
+    question: 前端高危命令确认弹窗依赖哪个事件
+    expected: frontend.md
+    note: 工具结束事件；丢了功能就坏
+
+  - id: q24
+    question: 怎么发现模型在编造答案
+    expected: frontend.md
+    note: 幻觉检测；回答是否复用工具结果
+
+  - id: q25
+    question: 多轮会话里来源卡片为什么会串到上一轮
+    expected: frontend.md
+    note: 累积历史导致的跨轮污染

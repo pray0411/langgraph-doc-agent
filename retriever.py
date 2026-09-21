@@ -21,6 +21,9 @@ from pathlib import Path
 
 import config
 from config import CHUNK_OVERLAP, CHUNK_SIZE, DOCS_DIR, EMBEDDING_MODEL, INDEX_DIR, INDEX_FILE
+from logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 SUPPORTED_EXTS = {".md", ".txt", ".py", ".rst", ".html"}
 
@@ -71,9 +74,9 @@ def get_encoder():
             from sentence_transformers import SentenceTransformer
 
             _encoder = SentenceTransformer(EMBEDDING_MODEL, cache_folder=str(HF_HOME))
-            print(f"[embedding] 语义检索可用：{EMBEDDING_MODEL}")
+            logger.info("语义检索可用：%s", EMBEDDING_MODEL)
         except Exception as exc:  # noqa: BLE001 - 任何失败都降级
-            print(f"[embedding] 语义检索不可用，回退纯 BM25：{exc}")
+            logger.warning("语义检索不可用，回退纯 BM25：%s", exc)
             _encoder = None
         return _encoder
 
@@ -250,7 +253,7 @@ def build_index(docs_dir: Path = DOCS_DIR, force: bool = False) -> dict:
     INDEX_FILE.write_text(
         json.dumps({"meta": meta, "records": records}, ensure_ascii=False), encoding="utf-8"
     )
-    print(f"[index] 索引完成：{len(docs)} 个文档 -> {len(records)} 个片段 -> {INDEX_FILE}")
+    logger.info("索引完成：%d 个文档 -> %d 个片段 -> %s", len(docs), len(records), INDEX_FILE)
     return {"meta": meta, "records": records}
 
 
@@ -276,6 +279,60 @@ def load_index() -> dict:
 _uploaded: list[dict] = []           # [{source, chunk, tokens}]
 _uploaded_lock = threading.Lock()
 _uploaded_version = 0                # 变更计数：纳入检索缓存 key，上传/删除后自动失效
+_uploaded_scan_done = False          # 是否已从磁盘扫描过（见 ensure_uploaded_index）
+
+
+def ensure_uploaded_index(uploads_dir: Path | str | None = None, force: bool = False) -> int:
+    """从磁盘上的 uploads 目录重建内存索引（幂等，进程内默认只扫一次）。
+
+    修复的问题：`_uploaded` 是**纯内存**索引，而全项目只有 HTTP 层的上传接口
+    (`server._handle_upload`) 会往里写，启动流程从不扫描 uploads 目录。后果是
+    "上传文件 → 重启服务 → 文件还在盘上、列表里也还在，但 chunks 为 0 且
+    永远检索不到"，用户会以为文件丢了。
+
+    这里把"内存索引从磁盘恢复"变成检索/列表路径的前置动作：任何一次
+    `search()` 或 `list_uploaded_files()` 都会先确保索引与磁盘对齐，
+    不再依赖调用方记得在启动时初始化。
+
+    返回本次纳入索引的文档数。
+    """
+    global _uploaded_scan_done
+    with _uploaded_lock:
+        if _uploaded_scan_done and not force:
+            return len({r["source"] for r in _uploaded})
+        _uploaded_scan_done = True
+
+    target = Path(uploads_dir) if uploads_dir else Path(config.UPLOADS_DIR)
+    if not target.is_dir():
+        return 0
+
+    loaded = 0
+    for path in sorted(target.glob("*")):
+        if not path.is_file() or path.suffix.lower() not in SUPPORTED_EXTS:
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.warning("跳过无法读取的上传文档 %s：%s", path.name, exc)
+            continue
+        add_uploaded_file(path.name, content)
+        loaded += 1
+    if loaded:
+        logger.info("已从 %s 恢复 %d 个上传文档的内存索引", target, loaded)
+    return loaded
+
+
+def reset_state() -> None:
+    """重置上传索引与缓存（测试复位用）。"""
+    global _uploaded_version, _uploaded_scan_done, _encoder, _encoder_loaded
+    with _uploaded_lock:
+        _uploaded.clear()
+        _uploaded_version += 1
+        _uploaded_scan_done = False
+    _search_cache.clear()
+    with _encoder_lock:
+        _encoder = None
+        _encoder_loaded = False
 
 
 def _uploaded_bm25_meta() -> tuple[int, Counter, float]:
@@ -317,6 +374,7 @@ def remove_uploaded_file(name: str) -> bool:
 
 def list_uploaded_files() -> list[dict]:
     """列出已索引的上传文档（名称 + 片段数）。"""
+    ensure_uploaded_index()
     counts: Counter = Counter(r["source"] for r in _uploaded)
     return [
         {"name": src.split("/", 1)[1], "chunks": n} for src, n in sorted(counts.items())
@@ -325,6 +383,7 @@ def list_uploaded_files() -> list[dict]:
 
 def _search_uploaded(q_tokens: list[str], top_k: int, min_score: float) -> list[dict]:
     """上传文档纯 BM25 检索，返回与全局通道同量纲的 RRF 融合分。"""
+    ensure_uploaded_index()
     if not _uploaded or not q_tokens:
         return []
     n_docs, df, avg_dl = _uploaded_bm25_meta()
@@ -385,8 +444,11 @@ def search(query: str, top_k: int = 3, min_score: float = MIN_SCORE) -> list[dic
     except OSError:
         index_mtime = 0.0
     key = _cache_key(query, top_k, min_score, index_mtime, _uploaded_version)
-    if key in _search_cache:
-        return _search_cache[key]
+    cached = _search_cache.pop(key, None)
+    if cached is not None:
+        # 命中即移到队尾：dict 保序，pop + 重新赋值即为 LRU 的"最近使用"
+        _search_cache[key] = cached
+        return cached
 
     data = load_index()
     meta = data["meta"]
@@ -451,8 +513,11 @@ def search(query: str, top_k: int = 3, min_score: float = MIN_SCORE) -> list[dic
     else:
         result = global_result
 
-    # 写缓存（简单 FIFO 上限）
-    if len(_search_cache) >= _SEARCH_CACHE_MAX:
-        _search_cache.clear()
+    # 写缓存（LRU 逐出）
+    # 修复的问题：原实现是"满了就 _search_cache.clear() 全清"，高并发下会出现
+    # 周期性抖动——刚算好的一批热门查询被一次性丢光，下一轮全部重算。
+    # 现在按"最久未使用"逐条淘汰，缓存利用率恒定。
     _search_cache[key] = result
+    while len(_search_cache) > _SEARCH_CACHE_MAX:
+        _search_cache.pop(next(iter(_search_cache)))
     return result

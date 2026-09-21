@@ -1,0 +1,139 @@
+# 统一工程配置：pytest / coverage / ruff
+#
+# 为什么要有这个文件：代码里此前已经出现 `# noqa: N802` 这类标注，说明开发者本机
+# 跑过 ruff —— **但 ruff 的配置从没提交**。结果是"我本机 lint 通过"不可复现，
+# 别人 clone 下来跑出的是另一套规则。配置必须跟着代码走。
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pray-agent"
+description = "基于 LangGraph 的通用 AI Agent（ReAct）：文档问答 / 联网搜索 / 代码落盘 / 命令执行"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+# version 与 dependencies 都是动态的：
+#   version      ← 仓库根目录 VERSION 文件（单一来源，见 config.APP_VERSION）
+#   dependencies ← requirements.txt
+# 这样"版本号"只有一处可改，不会出现 desktop.py / pyproject / tag 三处不一致。
+dynamic = ["version", "dependencies"]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "pytest-timeout", "ruff", "pip-audit"]
+
+[tool.setuptools]
+py-modules = [
+    "config", "graph", "logging_setup", "main", "memory", "prompts",
+    "retriever", "runterm", "server", "tools", "approvals", "desktop",
+    "mcp_server", "mcp_demo",
+]
+
+[tool.setuptools.dynamic]
+version = { file = ["VERSION"] }
+dependencies = { file = ["requirements.txt"] }
+
+# ---------------- pytest ----------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# --strict-markers：拼错的标记直接报错，而不是被静默忽略
+# （标记写错 = 用例没被筛选 = 你以为跑了其实没跑，这类问题必须让它红）
+addopts = "-q --strict-markers"
+markers = [
+    "unit: 纯函数级用例，无 IO、无端口、毫秒级",
+    "integration: 需要起真端口 / 走 HTTP / 落盘，秒级",
+    "eval: 检索质量评估（recall@k / MRR），指标跌破阈值即失败",
+    "e2e: 端到端（含前端），最重，CI 里单独阶段跑",
+    "slow: 明显偏慢的用例，本地开发可 -m 'not slow' 跳过",
+    "allow_network: 显式允许真实外呼（默认全部用例被禁网）。只应极少数端到端冒烟用例使用，且不进 CI。",
+]
+filterwarnings = [
+    # ResourceWarning 保持可见（default），但**不作为错误**：
+    # 用例里的 urllib/http.client 临时连接只在 GC 时释放，GC 时机不确定，
+    # 把它设为 error 会得到"随机某个用例失败"的 flaky 结果 —— 那不是好门禁，
+    # 是噪声。真实泄漏已由被测代码确定性修复（runterm 关管道、memory 关连接），
+    # 夹具残留则由 conftest 的 _release_handles 在受控点回收。
+    # 想专门查句柄泄漏：python -m pytest -W error::ResourceWarning（见 README）。
+    "default::ResourceWarning",
+    "ignore::DeprecationWarning:langchain.*",
+    "ignore::DeprecationWarning:langgraph.*",
+    "ignore::DeprecationWarning:pydantic.*",
+    "ignore::PendingDeprecationWarning",
+]
+# 测试输出里的日志噪声收敛到 WARNING 以上
+log_cli_level = "WARNING"
+
+# ---------------- coverage ----------------
+
+[tool.coverage.run]
+branch = true
+source = ["."]
+omit = [
+    "tests/*",
+    "legacy/*",
+    "mcp_demo.py",
+    "desktop.py",
+    "*/.venv-review/*",
+    "*/site-packages/*",
+]
+
+[tool.coverage.report]
+# 门禁：低于该值即失败。
+# 定为 70 是"当前真实水平"（产品代码约 72%，见 README 的覆盖率缺口说明），
+# 先防止倒退，再逐步抬升；一上来定 90 只会逼人写"为了覆盖率"的空用例。
+fail_under = 70
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+# ---------------- ruff ----------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = ["legacy", ".venv-review", "build", "dist"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",   # 行宽由 formatter 管，长中文注释不应阻断 CI
+    "B008",   # 工具函数默认参数里调用函数是刻意的（LangChain 工具定义风格）
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011", "E402"]
+
+# ---------------- mutmut（变异测试） ----------------
+#
+# 为什么要有它：覆盖率只能说明"这行代码被执行过"，说明不了"测试能抓住它的 bug"。
+# 变异测试会故意把代码改坏（== 改 !=、+ 改 -），再看测试**是否变红** —— 变红说明
+# 测试有效，仍全绿说明这块覆盖率是虚的。这是对"覆盖率高估"最直接的回应。
+#
+# 为什么只覆盖两个模块：变异测试要对每个变异体重跑一次相关用例，成本是覆盖率的
+# 几十倍。只挑"逻辑分支密集 + 测试充分"的小模块（审批表、检索）才划算；
+# 把 server.py/graph.py 也放进来会让一次运行从几分钟涨到几小时，没人会去跑。
+#
+# 运行：
+#   pip install mutmut==3.3.0
+#   python -m mutmut run        # 结果：python -m mutmut results
+[tool.mutmut]
+paths_to_mutate = ["approvals.py", "retriever.py"]
+tests_dir = "tests/"
+also_copy = ["VERSION"]

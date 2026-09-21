@@ -26,12 +26,15 @@ from http.server import ThreadingHTTPServer
 
 from server import Handler
 
+# 版本号**单一来源**：仓库根目录 VERSION 文件 → config.APP_VERSION。
+# 不要在桌面端硬编码 —— 此前 desktop.py("1.1.0")、pyproject.toml("0.9.0")
+# 与 Release tag 三处各写一个，随时会不一致。
+from config import APP_VERSION  # noqa: E402
+
 # 默认窗口尺寸
 WINDOW_SIZE = (1180, 800)
 
-# 桌面版版本号：与 GitHub Releases 的 tag（如 v1.1.0）比较触发更新提示。
-# 每次发布新版前手动 +1（若配置了 Actions 自动打包则由 CI 控制）。
-APP_VERSION = "1.1.0"
+# 与 GitHub Releases 的 tag（如 v1.1.0）比较触发更新提示。
 UPDATE_REPO = "pray0411/langgraph-doc-agent"
 
 

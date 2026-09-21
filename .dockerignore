@@ -1,0 +1,58 @@
+# 构建上下文排除项：只把"运行应用所必需"的东西送进镜像。
+# 目的有两个：① 镜像更小；② 避免把本地 .env / 凭据 / 会话库 / 日志误打进镜像。
+
+# --- 凭据与本地配置（最重要）---
+.env
+.env.*
+!.env.example
+_token.txt
+_device_code.txt
+
+# --- 版本控制与 CI ---
+.git
+.gitignore
+.github
+
+# --- 运行期产物（本地状态，绝不能进镜像）---
+index/
+data/
+generated/
+logs/
+models/
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# --- 测试与覆盖率产物 ---
+tests/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit/
+report.html
+
+# --- 打包产物 ---
+dist/
+build/
+*.spec.bak
+
+# --- 文档与素材（运行时不需要）---
+legacy/
+assets/
+docs/
+
+# --- Python 缓存 ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# --- 开发/桌面端可选依赖与脚本 ---
+requirements-dev.txt
+requirements-desktop.txt
+Pray.spec
+*.bat

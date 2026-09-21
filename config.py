@@ -10,6 +10,20 @@ except ImportError:  # dotenv 未安装时静默跳过
 
 BASE_DIR = Path(__file__).resolve().parent
 
+# 版本号**单一来源**：仓库根目录的 VERSION 文件。
+# 为什么要有这个文件：此前 `desktop.py:APP_VERSION = "1.1.0"` 与 Release tag
+# 是两处独立维护的值，`pyproject.toml` 里还有第三个（0.9.0）—— 三者随时可能
+# 不一致，而"当前是什么版本"这种问题不该有歧义。现在统一为：VERSION 文件 →
+# config.APP_VERSION → desktop 读取；pyproject.toml 也动态引用它。
+def _read_version() -> str:
+    try:
+        return (BASE_DIR / "VERSION").read_text(encoding="utf-8").strip() or "0.0.0"
+    except OSError:  # 打包/裁剪环境里文件缺失时不应让 import 失败
+        return "0.0.0"
+
+
+APP_VERSION = _read_version()
+
 # 文档与索引目录
 DOCS_DIR = Path(os.getenv("DOCS_DIR", BASE_DIR / "docs"))
 INDEX_DIR = Path(os.getenv("INDEX_DIR", BASE_DIR / "index"))
@@ -17,6 +31,11 @@ INDEX_DIR = Path(os.getenv("INDEX_DIR", BASE_DIR / "index"))
 # Agent 可写文件的根目录（write_file 工具的安全边界）：
 # 只允许在此目录内创建/修改文件，路径逃逸（../）会被拒绝
 WRITE_DIR = Path(os.getenv("WRITE_DIR", str(BASE_DIR / "generated")))
+
+# 上传文档目录：放在 WRITE_DIR 之内（同样受路径边界保护）。
+# 独立成配置项的原因：上传文档既要在 http 层落盘，又要在检索层重建索引，
+# 两边必须指向同一个目录，否则"文件在、检索不到"。
+UPLOADS_DIR = Path(os.getenv("UPLOADS_DIR", str(WRITE_DIR / "uploads")))
 
 # 多轮会话记忆存储（SQLite checkpointer）
 MEMORY_DB = os.getenv("MEMORY_DB", str(BASE_DIR / "data" / "memory.sqlite"))
@@ -130,21 +149,39 @@ def set_runtime_provider_config(provider: str, api_key: str, base_url: str = "",
         _runtime_config_version += 1
 
 
+def reset_state() -> None:
+    """清空运行时配置（测试复位用）。
+
+    运行时配置是进程级可变状态：不复位就会跨用例渗透，
+    表现为"某个用例改了 Key，后面所有用例都跟着变"。
+    """
+    global _runtime_config_version
+    with _runtime_config_lock:
+        _runtime_provider_config.clear()
+        _runtime_config_version += 1
+
+
 def get_provider_config(provider: str) -> dict:
-    """获取 provider 的有效配置（优先运行时设置，回退预设默认）。"""
+    """获取 provider 的有效配置（优先运行时设置，回退预设默认）。
+
+    返回值额外带 `source` 字段（"runtime" / "preset" / "unknown"），
+    供调用方判断 base_url 是**用户显式指定**的还是**预设默认值** ——
+    这是 `LLM_BASE_URL` 能生效的前提：预设默认值不该遮蔽环境变量。
+    """
     provider = provider.lower()
     # 运行时设置优先（持锁读取，避免读到写一半的 dict）
     with _runtime_config_lock:
         if provider in _runtime_provider_config:
-            return dict(_runtime_provider_config[provider])
+            return {**_runtime_provider_config[provider], "source": "runtime"}
 
     # 回退到预设默认（从环境变量读 Key）
     preset = PROVIDER_PRESETS.get(provider)
     if not preset:
-        return {"api_key": "", "base_url": "", "model": ""}
+        return {"api_key": "", "base_url": "", "model": "", "source": "unknown"}
     env_key = os.getenv(preset["api_key_env"], "")
     return {
         "api_key": env_key,
         "base_url": preset["default_base_url"],
         "model": preset["default_model"],
+        "source": "preset",
     }

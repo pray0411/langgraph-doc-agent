@@ -23,6 +23,7 @@ POST /api/run/stop  -> 终止终端进程
 import base64
 import json
 import queue
+import re
 import threading
 import time
 import uuid
@@ -31,8 +32,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from graph import ask
+from logging_setup import audit, get_logger, setup_logging
+
+logger = get_logger(__name__)
 
 INDEX_HTML = Path(__file__).parent / "static" / "index.html"
+DASHBOARD_HTML = Path(__file__).parent / "static" / "dashboard.html"
 
 # 请求体上限：10 KB（问答请求很小，防止滥用）
 MAX_BODY = 10 * 1024
@@ -51,6 +56,16 @@ UPLOAD_EXTS = {".md", ".txt", ".py", ".rst", ".html"}
 def _valid_modes() -> list[str]:
     from config import PROVIDER_PRESETS
     return list(PROVIDER_PRESETS.keys()) + ["ollama"]
+
+
+def _int_param(qs: dict, name: str, default: int, low: int, high: int) -> int:
+    """从查询串取一个被夹紧到 [low, high] 的整数参数（非法值退回默认）。"""
+    raw = (qs.get(name) or [""])[0]
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, value))
 
 
 # 当前运行模式（默认读取 .env 的 LLM_PROVIDER，可通过 /api/mode 动态切换）
@@ -158,6 +173,11 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self):  # noqa: N802
+        # 统一解析 path 与 query：原实现直接用 self.path 做等值比较，
+        # 一旦带上查询串（如 /api/sessions?q=xx）就匹配不到路由，静默 404。
+        _parts = urlsplit(self.path)
+        path = _parts.path
+        qs = parse_qs(_parts.query)
         if self.path in ("/", "/index.html"):
             html = INDEX_HTML.read_text(encoding="utf-8")
             self.send_response(200)
@@ -166,38 +186,65 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(html.encode("utf-8"))
-        elif self.path == "/health":
+        elif path == "/dashboard":
+            # 可观测性面板：把审计日志/降级记录/用量摆到台面上
+            if not DASHBOARD_HTML.exists():
+                self.send_error(404)
+                return
+            html = DASHBOARD_HTML.read_text(encoding="utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(html.encode("utf-8"))
+        elif path == "/health":
             self._json({"status": "ok"})
-        elif self.path == "/api/mode":
+        elif path == "/api/mode":
             self._json({"mode": get_mode(), "available_modes": available_modes()})
-        elif self.path == "/api/sessions":
+        elif path == "/api/sessions":
             if not self._auth_required():
                 return
-            self._handle_list_sessions()
-        elif self.path.startswith("/api/sessions/") and self.path.endswith("/messages"):
+            # 支持 ?q=<关键词>&limit=&offset= 的搜索与分页（原实现只返回固定 50 条）
+            self._handle_list_sessions(
+                query=(qs.get("q") or [""])[0],
+                limit=_int_param(qs, "limit", 50, low=1, high=200),
+                offset=_int_param(qs, "offset", 0, low=0, high=100000),
+            )
+        elif path.startswith("/api/sessions/") and path.endswith("/export"):
+            if not self._auth_required():
+                return
+            thread_id = path[len("/api/sessions/"):-len("/export")]
+            if thread_id:
+                self._handle_session_export(thread_id, (qs.get("format") or ["md"])[0])
+                return
+            self.send_error(404)
+        elif path.startswith("/api/sessions/") and path.endswith("/messages"):
             if not self._auth_required():
                 return
             # /api/sessions/<thread_id>/messages
-            prefix = "/api/sessions/"
-            suffix = "/messages"
-            thread_id = self.path[len(prefix):-len(suffix)]
+            thread_id = path[len("/api/sessions/"):-len("/messages")]
             if thread_id:
                 self._handle_session_messages(thread_id)
                 return
             self.send_error(404)
-        elif self.path == "/api/memory":
+        elif path == "/api/memory":
             if not self._auth_required():
                 return
             self._handle_memory_list()
-        elif self.path == "/api/uploads":
+        elif path == "/api/uploads":
             if not self._auth_required():
                 return
             self._handle_uploads_list()
-        elif self.path.startswith("/api/run/output"):
+        elif path == "/api/audit":
+            # 供 dashboard 读取最近审计记录（只读，不改状态）
+            if not self._auth_required():
+                return
+            self._handle_audit_tail(limit=_int_param(qs, "limit", 100, low=1, high=1000))
+        elif path.startswith("/api/run/output"):
             if not self._auth_required():
                 return
             self._handle_run_output()
-        elif self.path.startswith("/api/open"):
+        elif path.startswith("/api/open"):
             if not self._auth_required():
                 return
             self._handle_open_file()
@@ -283,6 +330,21 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._handle_upload()
             return
+        if self.path == "/api/uploads/rename":
+            if not self._auth_required():
+                return
+            self._handle_upload_rename()
+            return
+        if self.path == "/api/uploads/reindex":
+            if not self._auth_required():
+                return
+            self._handle_uploads_reindex()
+            return
+        if self.path == "/api/config/test":
+            if not self._auth_required():
+                return
+            self._handle_config_test()
+            return
         self.send_error(404)
 
     def _handle_set_mode(self):
@@ -322,6 +384,8 @@ class Handler(BaseHTTPRequestHandler):
 
         from config import set_runtime_provider_config
         set_runtime_provider_config(provider, api_key, base_url, model)
+        audit("config_update", provider=provider, base_url=base_url or "(preset)",
+              model=model or "(preset)")
         self._json(
             {
                 "ok": True,
@@ -465,10 +529,93 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001
             pass
 
-    def _handle_list_sessions(self):
+    def _handle_list_sessions(self, query: str = "", limit: int = 50, offset: int = 0):
+        """列出会话，支持关键词搜索与分页。
+
+        原实现只返回固定 50 条且无法检索；会话一多就只能靠肉眼翻。
+        这里的关键词在「标题 + 会话历史正文」上做大小写不敏感匹配。
+        """
         from graph import list_sessions
 
-        self._json({"sessions": list_sessions()})
+        sessions = list_sessions(limit=max(limit + offset, 50))
+        keyword = (query or "").strip().lower()
+        if keyword:
+            sessions = [
+                s for s in sessions
+                if keyword in (s.get("title") or "").lower()
+                or keyword in (s.get("thread_id") or "").lower()
+            ]
+        total = len(sessions)
+        page = sessions[offset:offset + limit]
+        self._json({
+            "sessions": page,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "query": query or "",
+        })
+
+    def _handle_session_export(self, thread_id: str, fmt: str = "md"):
+        """导出会话为 Markdown 或 JSON（便于存档/贴进 issue/做回归语料）。"""
+        from graph import get_session_messages
+
+        messages = get_session_messages(thread_id, provider=get_mode())
+        fmt = (fmt or "md").lower()
+        if fmt == "json":
+            payload = json.dumps(
+                {"thread_id": thread_id, "messages": messages},
+                ensure_ascii=False, indent=2,
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{thread_id}.json"')
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        lines = [f"# 会话 {thread_id}", ""]
+        for m in messages:
+            who = "我" if m.get("role") == "user" else "助手"
+            lines.append(f"**{who}**：{m.get('content', '')}")
+            tools = m.get("tools") or []
+            if tools:
+                lines.append(f"> 调用工具：{', '.join(tools)}")
+            lines.append("")
+        payload = "\n".join(lines).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/markdown; charset=utf-8")
+        self.send_header("Content-Disposition",
+                         f'attachment; filename="{thread_id}.md"')
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _handle_audit_tail(self, limit: int = 100):
+        """读取最近 N 条安全审计记录（dashboard 用；只读开销小）。"""
+        from logging_setup import _default_log_dir
+
+        path = Path(_default_log_dir()) / "audit.log"
+        if not path.exists():
+            self._json({"entries": [], "log_path": str(path)})
+            return
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            self._json({"error": f"读取审计日志失败: {exc}"}, 500)
+            return
+        entries = []
+        for line in lines[-limit:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        entries.reverse()  # 最新在前
+        self._json({"entries": entries, "log_path": str(path), "total_lines": len(lines)})
 
     def _handle_session_messages(self, thread_id: str):
         from graph import get_session_messages
@@ -505,10 +652,14 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- 文档上传 ----------
 
     def _upload_dir(self) -> Path:
-        """上传文件目录：WRITE_DIR/uploads/（不存在则创建）。"""
-        from config import WRITE_DIR
+        """上传文件目录：config.UPLOADS_DIR（默认 WRITE_DIR/uploads，不存在则创建）。
 
-        d = Path(WRITE_DIR).resolve() / "uploads"
+        目录来源收敛到 config，是为了让 http 层（落盘）与检索层（重建索引）
+        指向同一个位置 —— 两边各写一份路径正是"文件在、检索不到"的成因之一。
+        """
+        from config import UPLOADS_DIR
+
+        d = Path(UPLOADS_DIR).resolve()
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -567,6 +718,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": f"保存失败: {exc}"}, 500)
             return
         chunks = add_uploaded_file(name, text)
+        audit("upload", name=name, size=len(content), chunks=chunks)
         self._json({
             "ok": True,
             "name": name,
@@ -620,6 +772,107 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": f"未找到上传文档 {cleaned}"}, 404)
             return
         self._json({"ok": True, "name": cleaned, "message": f"已删除 {cleaned}"})
+
+    def _handle_upload_rename(self):
+        """重命名已上传文档（磁盘文件 + 内存索引同步改名）。
+
+        易漏点：只改磁盘文件而不动内存索引，会出现"列表里名字变了、
+        检索仍命中旧 source"，反之亦然。这里两处一起改。
+        """
+        from retriever import add_uploaded_file, remove_uploaded_file
+
+        data = self._read_form()
+        old = self._clean_upload_name((data.get("name") or [""])[0])
+        new = self._clean_upload_name((data.get("new_name") or [""])[0])
+        if not old or not new:
+            self._json({"error": "name / new_name 不合法或扩展名不受支持"}, 400)
+            return
+        if old == new:
+            self._json({"ok": True, "name": new, "message": "新旧名称相同，无需改名"})
+            return
+        src = self._upload_dir() / old
+        dst = self._upload_dir() / new
+        if not src.exists():
+            self._json({"error": f"未找到上传文档 {old}"}, 404)
+            return
+        if dst.exists():
+            self._json({"error": f"目标名称已存在: {new}"}, 409)
+            return
+        try:
+            text = src.read_text(encoding="utf-8")
+            dst.write_text(text, encoding="utf-8")
+            src.unlink()
+        except (OSError, UnicodeDecodeError) as exc:
+            self._json({"error": f"重命名失败: {exc}"}, 500)
+            return
+        remove_uploaded_file(old)
+        chunks = add_uploaded_file(new, text)
+        audit("upload_rename", old_name=old, new_name=new, chunks=chunks)
+        self._json({"ok": True, "name": new, "chunks": chunks,
+                    "message": f"已重命名 {old} → {new}（{chunks} 个片段）"})
+
+    def _handle_uploads_reindex(self):
+        """从磁盘重建上传文档的内存索引（手动兜底入口）。
+
+        正常路径下 `retriever` 会惰性对齐（见 ensure_uploaded_index），
+        这个接口用于"用户手动改了 uploads 目录里的文件"之后强制对齐。
+        """
+        from retriever import ensure_uploaded_index, list_uploaded_files
+
+        loaded = ensure_uploaded_index(self._upload_dir(), force=True)
+        files = list_uploaded_files()
+        audit("uploads_reindex", loaded=loaded, chunks=sum(f["chunks"] for f in files))
+        self._json({
+            "ok": True,
+            "reindexed": loaded,
+            "files": files,
+            "message": f"已重建 {loaded} 个文档、{sum(f['chunks'] for f in files)} 个片段的索引",
+        })
+
+    def _handle_config_test(self):
+        """连通性自检：用当前（或传入）配置向网关发一次最小请求，报告是否通。
+
+        为什么值得单独做一个接口：自定义 OpenAI 兼容网关最容易踩的坑是
+        "地址填错/模型名不对/Key 无效"，而这类错误在正式提问时才爆发，
+        排查成本高。这里把它变成一个可以主动点的按钮。
+        """
+        import urllib.error
+        import urllib.request
+
+        from config import get_provider_config
+
+        data = self._read_form()
+        provider = (data.get("provider") or [get_mode()])[0].strip().lower()
+        base_url = (data.get("base_url") or [""])[0].strip()
+        api_key = (data.get("api_key") or [""])[0].strip()
+
+        pcfg = get_provider_config(provider)
+        base_url = base_url or (pcfg.get("base_url") or "")
+        api_key = api_key or (pcfg.get("api_key") or "")
+        if not base_url:
+            self._json({"ok": False, "error": "缺少 base_url"}, 400)
+            return
+
+        url = base_url.rstrip("/") + "/models"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                ok = 200 <= resp.status < 300
+                body = resp.read(4096).decode("utf-8", errors="replace")
+            audit("gateway_probe", provider=provider, base_url=base_url, ok=ok,
+                  status=resp.status)
+            self._json({"ok": ok, "status": resp.status, "url": url,
+                        "message": "网关连通" if ok else "网关返回非 2xx",
+                        "body_preview": body[:500]})
+        except urllib.error.HTTPError as exc:
+            audit("gateway_probe", provider=provider, base_url=base_url, ok=False,
+                  status=exc.code)
+            self._json({"ok": False, "status": exc.code, "url": url,
+                        "message": f"网关可达但返回 {exc.code}（通常是 Key 或模型名问题）"})
+        except Exception as exc:  # noqa: BLE001
+            audit("gateway_probe", provider=provider, base_url=base_url, ok=False,
+                  error=str(exc)[:200])
+            self._json({"ok": False, "url": url, "message": f"无法连通: {exc}"}, 200)
 
     def _read_form(self) -> dict:
         """读取表单并限制大小。失败返回 {}。"""
@@ -739,13 +992,48 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def log_message(self, *args):  # 精简日志
-        pass
+    def log_message(self, *args):  # noqa: N802
+        """访问日志：恢复输出，但**脱敏**。
+
+        修复的问题：原实现是直接 `pass` —— 所有 HTTP 访问日志被静音，
+        出了问题（哪个接口 500、谁在刷 /ask）事后完全查不到。
+        但直接恢复默认格式又会把 `X-API-Token` 等敏感头写进日志，
+        所以这里改为走 logger 并只记录方法、路径与状态码。
+        """
+        try:
+            # BaseHTTPRequestHandler 调用形式：log_message(format, *args)
+            message = args[0] % args[1:] if len(args) > 1 else (args[0] if args else "")
+        except Exception:  # noqa: BLE001
+            message = " ".join(str(a) for a in args)
+        message = re.sub(r"(X-API-Token|token|api_key)=?[^\s&]*", r"\1=***", str(message),
+                         flags=re.IGNORECASE)
+        logger.info("http %s", message)
+
+
+def reset_state() -> None:
+    """重置进程级状态（测试复位用）：当前模式 + 上传索引缓存。"""
+    global _current_mode
+    with _mode_lock:
+        _current_mode = None
 
 
 def run(host: str = "127.0.0.1", port: int = 8000):
-    print(f"网页服务已启动: http://{host}:{port}")
-    print("按 Ctrl+C 停止。")
+    """启动 web 服务（阻塞）。日志同时写控制台与 logs/app.log。"""
+    log_dir = setup_logging()
+    logger.info("网页服务已启动: http://%s:%s", host, port)
+    logger.info("应用日志: %s/app.log ；安全审计日志: %s/audit.log", log_dir, log_dir)
+
+    # 启动即把磁盘上的上传文档恢复到内存索引：
+    # 否则"重启后上传的文件还在、却检索不到"（retriever 侧虽已惰性兜底，
+    # 这里显式做一次可以让启动日志直接体现恢复了几份文档）
+    try:
+        from retriever import ensure_uploaded_index
+
+        restored = ensure_uploaded_index()
+        if restored:
+            logger.info("已恢复 %d 个上传文档的检索索引", restored)
+    except Exception:  # noqa: BLE001 - 索引恢复失败不应阻塞服务启动
+        logger.exception("恢复上传文档索引失败（服务继续启动）")
 
     # 后台线程定期清理闲置终端会话（防内存泄漏）
     def _sweep_loop():
@@ -756,9 +1044,9 @@ def run(host: str = "127.0.0.1", port: int = 8000):
             try:
                 n = runterm.sweep_stale()
                 if n:
-                    print(f"[runterm] 清理 {n} 个闲置会话")
+                    logger.info("清理 %d 个闲置终端会话", n)
             except Exception:  # noqa: BLE001
-                pass
+                logger.exception("清理闲置终端会话失败")
 
     threading.Thread(target=_sweep_loop, daemon=True).start()
     ThreadingHTTPServer((host, port), Handler).serve_forever()

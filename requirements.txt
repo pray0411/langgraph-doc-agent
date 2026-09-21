@@ -1,11 +1,28 @@
+# 运行时依赖（不含测试框架 —— 测试依赖见 requirements-dev.txt）
+#
+# 安装：pip install -r requirements.txt
+# 开发：pip install -r requirements.txt -r requirements-dev.txt
+
 langgraph==1.2.11
 langchain==1.3.18
 langchain-core==1.6.1
 langchain-openai==1.4.1
 openai==2.53.0
-duckduckgo-search==8.1.1
-jieba==0.42.1
-sentence-transformers==6.0.0
 langgraph-checkpoint-sqlite==3.1.1
+
+# 中文分词（BM25 检索通道；未安装时 retriever 自动降级为 bigram 分词）
+jieba==0.42.1
+
+# 语义检索通道（可选但默认安装；不可用时自动回退纯 BM25）
+# 注意：会拉取 torch，镜像体积/安装耗时较大。
+# 只要 BM25 的话可以先装其余依赖，再单独执行：
+#   pip uninstall -y sentence-transformers torch transformers
+sentence-transformers==6.0.0
+
+# 联网搜索（无 Bocha Key 时的兜底引擎）
+# 上游已把包名从 duckduckgo-search 改为 ddgs（旧名不再维护）。
+# 代码里 tools._ddg_search 做了双包名兼容导入，因此两种装法都能跑。
+ddgs==9.5.5
+
+# .env 读取
 python-dotenv==1.2.2
-pytest==9.1.1

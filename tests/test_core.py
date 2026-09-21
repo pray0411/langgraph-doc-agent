@@ -6,6 +6,10 @@
 测试设计原则：
 - 不依赖真实网络（天气/搜索工具用 mock）
 - 索引构建隔离到临时目录（tmp_path），不污染仓库
+
+公共夹具（环境密封、目录隔离、假模型服务）见 tests/conftest.py ——
+原先放在本文件顶部的 `_clean_env` 已被它取代：那份实现对 `.env` 不设防，
+会被 `config.load_dotenv()` 在模块重导入时击穿。
 """
 import base64
 import json
@@ -17,42 +21,6 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-
-# ---------- fixture ----------
-
-@pytest.fixture(autouse=True)
-def _clean_env(tmp_path, monkeypatch):
-    """每个测试前清理环境变量 + 把索引/文档/记忆目录隔离到临时目录。"""
-    for k in ("LLM_PROVIDER", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "BOCHA_API_KEY",
-              "API_TOKEN", "MEMORY_DB", "EMBEDDING_MODEL"):
-        monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("DOCS_DIR", str(tmp_path / "docs"))
-    monkeypatch.setenv("INDEX_DIR", str(tmp_path / "index"))
-    monkeypatch.setenv("MEMORY_DB", str(tmp_path / "memory.sqlite"))
-    monkeypatch.setenv("EMBEDDING_MODEL", "nonexistent-no-download")
-    # 重新导入相关模块以应用 monkeypatch（config 在 import 时读 env）
-    for mod in ("config", "retriever", "tools", "graph", "server"):
-        sys.modules.pop(mod, None)
-    yield
-    for mod in ("config", "retriever", "tools", "graph", "server"):
-        sys.modules.pop(mod, None)
-
-
-@pytest.fixture()
-def sample_docs(tmp_path):
-    """在临时 docs 目录写入测试文档。"""
-    docs = tmp_path / "docs"
-    docs.mkdir(exist_ok=True)
-    (docs / "project_intro.md").write_text(
-        "# 项目介绍\n"
-        "本项目是一个基于 LangGraph 构建的智能文档问答 Agent。\n"
-        "用户可以用自然语言对文档集合提问，Agent 会检索相关片段并由大模型回答。\n"
-        "## 技术栈\n"
-        "Python 3.10+，LangGraph，TF-IDF 检索（已升级为 BM25）。",
-        encoding="utf-8",
-    )
-    return docs
 
 
 # ---------- 检索（BM25） ----------
@@ -193,13 +161,11 @@ def test_search_falls_back_to_bm25_without_embedding(sample_docs, monkeypatch):
     assert len(hits) > 0
 
 
-def test_search_irrelevant_query_returns_empty(sample_docs):
-    """完全无关的问题（无共现词且语义无关）应返回空。"""
-    from retriever import build_index, search
-
-    build_index(force=True)
-    hits = search("量子物理和弦理论的区别", top_k=3)
-    assert hits == []
+# 说明：此前这里还有一份 **同名** 的 test_search_irrelevant_query_returns_empty
+# （与本文件前面的那一份同名）。Python 的模块命名空间后定义者胜出，pytest 只会
+# 收集后一个 —— 第一个版本从未执行过，而"文件里 99 个 def test_ / 实际收集 98 条"
+# 的差值正是它。两份断言等价，已合并保留一份，并由 tests/test_metatest.py 守护
+# 同类问题不再发生。
 
 
 # ---------- 配置 ----------
@@ -373,24 +339,38 @@ def test_reflection_uses_real_tool_names():
 
 # ---------- 服务端超时 ----------
 
-def test_ask_timeout_wait_returns_504_semantics():
-    """/ask 的超时等待逻辑：worker 未在期限内完成时应判定超时。"""
+def test_ask_timeout_returns_504_with_readable_body(monkeypatch):
+    """真实 HTTP：ask 卡住超过 REQUEST_TIMEOUT 时 /ask 必须返回 504 + 可读提示。
+
+    重写说明：原用例 `test_ask_timeout_wait_returns_504_semantics` 从头到尾
+    **没有触碰 server.py 的任何一行** —— 它只是重新实现了一遍
+    `threading.Event.wait` 的语义再断言它（`import server` 之后导入了就没用过）。
+    这属于"自己出题自己答"，制造了虚假的覆盖率：
+    它给不了任何关于 /ask 超时行为的信心，却让覆盖率报表显示这一块"已覆盖"。
+
+    现在真起服务、真发请求、真断言状态码与响应体。
+    """
+    from http.server import ThreadingHTTPServer
+
     import server as server_mod
 
-    result_box = {}
-    done = threading.Event()
-    started = threading.Event()
+    def _hanging_ask(question, show_log=False, mode=None, history=None, thread_id=None):
+        # 模拟"模型调用卡死"：远超 REQUEST_TIMEOUT
+        threading.Event().wait(10)
+        return "永远不会返回", {}
 
-    def _never_finishes():
-        started.set()
-        threading.Event().wait(5)  # 永不返回（模拟卡死的模型调用）
+    monkeypatch.setattr(server_mod, "ask", _hanging_ask)
+    monkeypatch.setattr(server_mod, "REQUEST_TIMEOUT", 0.2)
 
-    t = threading.Thread(target=_never_finishes, daemon=True)
-    t.start()
-    started.wait(1)
-    timed_out = not done.wait(timeout=0.1)
-    assert timed_out is True
-    assert "ok" not in result_box
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), server_mod.Handler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, body = _http_post(f"http://127.0.0.1:{port}", {"question": "hi"}, timeout=20)
+        assert status == 504, f"应返回 504，实际 {status}: {body}"
+        assert "超时" in body
+    finally:
+        srv.shutdown()
 
 
 # ---------- legacy 归档完整性 ----------
@@ -804,21 +784,29 @@ def http_server(monkeypatch, tmp_path):
     monkeypatch.setattr(server_mod, "ask", _fake_ask)
 
     srv = _THS(("127.0.0.1", 0), server_mod.Handler)
+    # daemon_threads：用例里可能有 SSE 长连接，避免 server_close() 在
+    # 回收阶段被未结束的 handler 线程阻塞住。
+    srv.daemon_threads = True
     port = srv.server_address[1]
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     yield f"http://127.0.0.1:{port}", call_log
     srv.shutdown()
+    # 关监听套接字：少了这一步每起一个服务就漏一个 socket
+    srv.server_close()
 
 
-def _http_post(url, body, token=None):
+def _http_post(url, body, token=None, endpoint="/ask", timeout=10):
     data = urllib.parse.urlencode(body).encode()
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    # Connection: close —— 不显式要求关闭时，服务端 handler 会留在 keep-alive
+    # 状态等下一个请求，连接套接字只在 GC 时才释放，表现为随机挂到别的用例上的
+    # `ResourceWarning: unclosed <socket.socket ...>`。测试客户端不需要长连接。
+    headers = {"Content-Type": "application/x-www-form-urlencoded", "Connection": "close"}
     if token:
         headers["X-API-Token"] = token
-    req = urllib.request.Request(url + "/ask", data=data, method="POST", headers=headers)
+    req = urllib.request.Request(url + endpoint, data=data, method="POST", headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8")
@@ -847,11 +835,30 @@ def test_http_ask_echoes_thread_id(http_server):
     assert call_log["args"]["thread_id"] == "abc123"
 
 
-def test_http_auth_401_without_token(monkeypatch, tmp_path):
-    """配置 API_TOKEN 后，/ask 无 token 应返回 401（真实 HTTP 契约）。"""
+def test_http_auth_401_without_token(monkeypatch):
+    """配置 API_TOKEN 后，/ask 无 token 应返回 401（真实 HTTP 契约）。
+
+    关键修复（原为 P0）：这条用例此前**没有 monkeypatch 掉 `server.ask`**，
+    于是"带正确 token"那一步会真的去调用模型——
+      - 在干净环境（无 `.env`）下：Key 为空 → 真实请求失败 → 返回 500，
+        用例断言 200 失败（这就是"CI 上必然红"的那一条）；
+      - 在开发者本机（有 `.env`）：真的调用 DeepSeek 付费接口并返回 200，
+        用真实 API 额度换来了一个"绿"。
+    测鉴权契约不需要模型参与，因此这里把 ask 换成桩函数，
+    让用例只验证"鉴权这一件事"。
+    """
     monkeypatch.setenv("API_TOKEN", "secret123")
     from http.server import ThreadingHTTPServer as _THS
+
     import server as server_mod
+
+    calls = []
+
+    def _fake_ask(question, show_log=False, mode=None, history=None, thread_id=None):
+        calls.append(question)
+        return "桩回答", {"messages": [], "reflection": "{}", "sources": []}
+
+    monkeypatch.setattr(server_mod, "ask", _fake_ask)
 
     srv = _THS(("127.0.0.1", 0), server_mod.Handler)
     port = srv.server_address[1]
@@ -862,8 +869,11 @@ def test_http_auth_401_without_token(monkeypatch, tmp_path):
         assert status == 401
         assert "API Token" in body
 
-        status2, _ = _http_post(f"http://127.0.0.1:{port}", {"question": "hi"}, token="secret123")
-        assert status2 == 200
+        status2, body2 = _http_post(
+            f"http://127.0.0.1:{port}", {"question": "hi"}, token="secret123"
+        )
+        assert status2 == 200, body2
+        assert calls == ["hi"], "带正确 token 时应放行到 ask"
     finally:
         srv.shutdown()
 
@@ -1231,16 +1241,17 @@ def test_ask_stream_yields_start_then_done(monkeypatch, tmp_path):
             return State()
 
     fake = FakeAgent()
-    # 外部动态赋值（避免类内 __ 名称改写），模拟真实 build_agent 挂 handler
+
     class Handler:
-        def __init__(self):
-            self._store = {}
-        def set_current_thread(self, tid):
-            pass
-        def get(self, tid):
+        """桩 usage 回调：只实现 ask_stream 用到的 total()。"""
+
+        def total(self):
             return {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-    fake.__usage_handler = Handler()
+
     monkeypatch.setattr(graph_mod, "build_agent", lambda mode=None, memory=None: fake)
+    # usage 回调现在是"每次请求新建 + config callbacks 注入"，
+    # 因此从工厂函数这个接缝注入桩对象（替代旧的 agent.__usage_handler）
+    monkeypatch.setattr(graph_mod, "_new_usage_capture", lambda: Handler())
 
     events = list(graph_mod.ask_stream("你好", mode="deepseek", thread_id="t1"))
     types = [e["type"] for e in events]
@@ -1482,13 +1493,40 @@ def test_run_command_high_risk_requires_confirm(monkeypatch, tmp_path):
 
 
 def test_run_command_high_risk_runs_when_confirmed(monkeypatch, tmp_path):
-    """高危命令确认后应执行。"""
+    """高危命令在**用户批准后**应进入执行分支（覆盖审批闸门本身）。
+
+    重写说明：原用例名叫"高危命令确认后应执行"，但它传的命令是
+    `python -c "print('ok')"` —— 该命令**不命中任何高危模式**，直接走普通
+    执行分支，从头到尾没进过审批逻辑。用例名与断言强度不匹配，
+    会让人误以为"批准后执行"这条路径已被覆盖（实际上由下面 guard 里的
+    test_run_command_approval_flow 覆盖，这条则完全是重复且失真的）。
+
+    现在换成真正命中高危模式的命令，并显式断言"未批准必须拒绝"。
+    """
+    import re
+
+    import approvals
     import config as config_mod
+    import tools as tools_mod
+
+    approvals.clear()
     monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
     from tools import run_command
 
-    r = run_command.invoke({"command": sys.executable + " -c \"print('ok')\"", "confirmed": True})
-    assert "执行成功" in r
+    cmd = "move not-exist-a.txt not-exist-b.txt"  # 命中 \bmove\b，且无副作用
+    assert any(re.search(p, cmd, re.IGNORECASE) for p in tools_mod._HIGH_RISK_PATTERNS), (
+        "前提不成立：该命令必须命中高危模式，否则这条用例又变成了普通执行测试"
+    )
+
+    # 未批准：confirmed=True 也必须被拒绝（模型不能自封权限）
+    r0 = run_command.invoke({"command": cmd, "confirmed": True})
+    assert "NEED_CONFIRM" in r0
+
+    # 用户在前端确认 → /api/approve 登记批准
+    approvals.approve(cmd)
+    r1 = run_command.invoke({"command": cmd, "confirmed": True})
+    assert "NEED_CONFIRM" not in r1, f"批准后不应再要求确认：{r1}"
+    assert "执行成功" in r1 or "执行失败" in r1, f"批准后应进入执行分支：{r1}"
 
 
 def test_run_command_blocks_destructive(monkeypatch, tmp_path):
@@ -1994,26 +2032,58 @@ def test_run_command_approval_flow(monkeypatch, tmp_path):
     assert "NEED_CONFIRM" in r3, "批准应一次性消费"
 
 
-def test_usage_capture_accumulates_per_thread():
-    """Token 用量应按会话累计，且跨会话隔离（Codex 指出的覆盖/串值问题）。"""
+def test_usage_capture_accumulates_within_one_request():
+    """Token 用量应在**单次请求内**累加全部模型调用（多步工具循环会调用多次）。"""
     import graph as graph_mod
 
     h = graph_mod._UsageCapture()
+    # 还没发生任何模型调用 → None（调用方据此降级为文本估算）
+    assert h.total() is None
 
     class FakeResp:
         def __init__(self, pt, ct):
-            self.llm_output = {"token_usage": {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}}
+            self.llm_output = {"token_usage": {"prompt_tokens": pt, "completion_tokens": ct,
+                                               "total_tokens": pt + ct}}
 
-    # 线程 A 两次调用
-    h.set_current_thread("t1")
     h.on_llm_end(FakeResp(100, 50))
     h.on_llm_end(FakeResp(200, 80))
-    # 线程 B 一次调用
-    h.set_current_thread("t2")
-    h.on_llm_end(FakeResp(30, 10))
+    assert h.total() == {"prompt_tokens": 300, "completion_tokens": 130, "total_tokens": 430}
 
-    u1 = h.get("t1")
-    assert u1["total_tokens"] == 430, f"t1 应累计 430，实际 {u1}"
-    u2 = h.get("t2")
-    assert u2["total_tokens"] == 40, f"t2 应 40，实际 {u2}"
-    assert h.get("nonexistent") is None
+    # 读取是非破坏性的（流式路径可能要在 done 事件里重复读取）
+    assert h.total() == {"prompt_tokens": 300, "completion_tokens": 130, "total_tokens": 430}
+
+
+def test_usage_capture_is_isolated_between_requests():
+    """两个并发请求的用量回调互不串值（旧实现靠 threading.local + 共享 handler）。
+
+    这是对旧设计的回归守护：曾经 handler 挂在 agent 上被缓存复用，
+    只能靠"当前线程正在服务哪个会话"来分桶 —— 一旦请求在线程间迁移
+    （连接复用、异步执行）就会串值。现在每次请求一个 handler，
+    隔离是结构性的，而不是靠约定。
+    """
+    import graph as graph_mod
+
+    class FakeResp:
+        def __init__(self, pt, ct):
+            self.llm_output = {"token_usage": {"prompt_tokens": pt, "completion_tokens": ct,
+                                               "total_tokens": pt + ct}}
+
+    results = {}
+
+    def _worker(name, pt, ct, repeat):
+        handler = graph_mod._new_usage_capture()
+        for _ in range(repeat):
+            handler.on_llm_end(FakeResp(pt, ct))
+        results[name] = handler.total()
+
+    threads = [
+        threading.Thread(target=_worker, args=("a", 10, 1, 3)),
+        threading.Thread(target=_worker, args=("b", 100, 10, 2)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert results["a"]["total_tokens"] == 33
+    assert results["b"]["total_tokens"] == 220

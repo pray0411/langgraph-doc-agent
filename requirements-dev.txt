@@ -1,0 +1,19 @@
+# 开发与测试依赖（运行时依赖见 requirements.txt）
+#
+# 安装：pip install -r requirements.txt -r requirements-dev.txt
+# 说明：pytest 从 requirements.txt 移到这里 —— 运行时依赖里混入测试框架会让
+#      "部署镜像"无谓地带上测试工具链，也会让"生产依赖"与"开发依赖"的边界消失。
+
+-r requirements.txt
+
+pytest==9.1.1
+pytest-cov==7.0.0
+pytest-timeout==2.4.0
+pytest-html==4.2.0          # CI 里生成可读报告（artifact）
+ruff==0.14.2                # lint + format
+pip-audit==2.9.0            # 已知漏洞扫描（CI 里跑）
+
+# 可选：行为契约 / 属性测试与变异测试（较重，按需安装）
+# schemathesis==4.0.0       # 基于 OpenAPI 的属性测试
+# mutmut==3.3.0             # 变异测试：检验"测试能不能抓住 bug"
+# playwright==1.56.0        # 前端 E2E（需再执行 playwright install chromium）

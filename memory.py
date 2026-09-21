@@ -40,15 +40,21 @@ def _conn() -> sqlite3.Connection:
     db = Path(GLOBAL_MEMORY_DB)
     db.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db), timeout=5)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS profile (
-            key        TEXT PRIMARY KEY,     -- 记忆键（同一主题覆盖更新）
-            value      TEXT NOT NULL,        -- 记忆内容
-            updated_at TEXT NOT NULL         -- 更新时间（ISO 本地时间）
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS profile (
+                key        TEXT PRIMARY KEY,     -- 记忆键（同一主题覆盖更新）
+                value      TEXT NOT NULL,        -- 记忆内容
+                updated_at TEXT NOT NULL         -- 更新时间（ISO 本地时间）
+            )
+            """
         )
-        """
-    )
+    except Exception:
+        # 建表失败时把连接关掉再抛：否则这个连接永远不会被 close，
+        # 表现为 `ResourceWarning: unclosed database`（且长跑进程会持续泄漏句柄）。
+        conn.close()
+        raise
     return conn
 
 

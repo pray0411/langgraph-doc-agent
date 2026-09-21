@@ -4,6 +4,15 @@
 
 > 从"专用文档问答 Agent"升级而来。核心变化：不再用规则判断"该走哪条路"，而是把工具交给模型，由模型自主决定何时调用什么工具（ReAct / Tool-calling 架构，LangGraph 最主流的 Agent 模式）。
 
+[![CI](https://github.com/pray0411/langgraph-doc-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/pray0411/langgraph-doc-agent/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+> **badge 是可验证的**：点进去能看到最近的运行结果、覆盖率报告与失败详情（CI 的
+> artifact 里有 `junit/*.xml`、`coverage.xml`、`report/report.html`）。
+> CI 在 **Windows + Linux × Python 3.10/3.12/3.13** 六个组合上跑，且**不提供任何
+> API Key、不提供 `.env`** —— 用来证明"测试通过"这句话在别人的机器上同样成立。
+
+
 ## 核心能力
 
 | 能力 | 工具 | 示例 |
@@ -201,12 +210,21 @@ langgraph-doc-agent/
 ├── runterm.py       # 交互终端会话（子进程管理：启动/输入/输出/停止）
 ├── main.py          # 命令行入口
 ├── config.py        # 配置（运行时 provider 动态切换、记忆/检索/鉴权配置）
+├── approvals.py     # 高危命令审批登记（一次性消费 + 5 分钟 TTL）
+├── logging_setup.py # 结构化日志 + 安全审计日志（凭据脱敏）
 ├── legacy/          # V1 历史存档（graph_v1.py / llm.py），不参与运行
+├── tests/           # 测试（含元测试 / 契约 / 集成 / 评估 / E2E / 性能分层）
+├── VERSION          # 版本号单一来源（config.APP_VERSION、pyproject 均引用它）
+├── pyproject.toml   # 统一配置：pytest / coverage / ruff / mutmut
+├── Dockerfile       # 隔离运行环境（非 root 用户 + 健康检查）
+├── .github/workflows/  # CI（六组合矩阵 + lint + 漏洞扫描）/ Release（打 tag 出包）
+├── CHANGELOG.md     # 迭代记录
+├── LICENSE          # MIT
 ├── start.bat        # 前台启动脚本
 ├── start-background.bat  # 后台静默启动（不会自动注册开机自启；如需自启请自行把
 │                         #   start-background.bat 快捷方式放入「启动」文件夹）
 ├── stop.bat         # 停止服务
-├── requirements.txt
+├── requirements.txt / requirements-dev.txt / requirements-mcp.txt / requirements-desktop.txt
 ├── .env.example
 ├── docs/            # 文档知识库
 ├── static/          # 网页前端
@@ -266,23 +284,100 @@ python -X utf8 desktop.py --check    # 无窗口自检（起服务→请求首�
 `Pray.spec` 默认排除 torch/sentence-transformers（桌面版检索自动回退纯 BM25），
 体积 ~200MB；如需语义检索删掉对应 excludes 再打（体积 >1GB，首次要下模型）。
 
-## 测试
+## 测试与质量体系
 
 ```bash
-python -m pytest tests/ -v
+# 安装（运行时 + 开发依赖分开，部署镜像不带测试工具链）
+pip install -r requirements.txt -r requirements-dev.txt
+
+# 全量（含覆盖率门禁：低于 70% 直接失败）
+python -X utf8 -m pytest tests/ --cov=. --cov-report=term-missing
+
+# 快速迭代（跳过偏慢的性能基线）
+python -X utf8 -m pytest tests/ -m "not slow"
+
+# 检索质量评估（recall@k / MRR，指标跌破阈值即失败）
+python -X utf8 -m pytest tests/ -m eval -q -s
+
+# 前端 E2E（需先 pip install playwright && python -m playwright install chromium）
+python -X utf8 -m pytest tests/e2e -m e2e -q
+
+# 性能基线（P50/P95 并显示实测数字）
+python -X utf8 -m pytest tests/ -m slow -q -s
+# 在已知机器上重新生成基线（提交 perf_baseline.json 后，门禁变为"不超过基线 1.5×"）
+PERF_WRITE_BASELINE=1 python -X utf8 -m pytest tests/test_perf.py -m slow -q -s
+
+# 句柄泄漏排查（ResourceWarning 默认可见但不致命，需要严查时用这条）
+python -X utf8 -m pytest tests/ -W error::ResourceWarning
+
+# 依赖漏洞扫描
+pip-audit -r requirements.txt --desc
 ```
 
-测试覆盖：混合检索（语义通道/BM25 回退/无关拒答）、checkpointer 多轮记忆、
-API Token 鉴权、并发配置读写、工具降级（网络故障时不崩溃）、
-真实工具调用提取与 grounded 检查、来源提取（文档/网页）、
-会话列表与删除、历史回放（含 sources/reflection 生成）、流式事件结构、
-Token 用量提取与成本估算、真实 HTTP 契约（thread_id/401）。
-测试不依赖真实网络/仓库文件系统（索引与记忆隔离到临时目录）。
+### 测试分层
 
-## 后续扩展
+| 层 | 位置 | 说明 |
+|---|---|---|
+| 元测试 | `tests/test_metatest.py` | **测试套件自检**：同名用例、环境密封性、自证式用例、版本号单一来源、CI 配置有效性 —— 用测试守护测试本身 |
+| 单元 | `tests/test_core.py` | 纯函数与模块级行为（检索、记忆、反思、成本估算） |
+| 契约 | `tests/test_server_writes.py` | 真实 HTTP 打写接口：上传/删除/改名/重建索引/审批/命令执行 |
+| 集成 | `tests/test_agent_loop.py` | **本地假 OpenAI 兼容服务**驱动真实 ReAct 工具循环（不联网、不花钱、确定性） |
+| 多 provider | `tests/test_provider_contract.py` | 6 个 provider 的配置解析 + 请求构造契约（不真调 API） |
+| 质量评估 | `tests/test_retrieval_eval.py` | recall@3 / MRR 带阈值门禁 |
+| 前端 E2E | `tests/e2e/` | Playwright 金路径 + XSS 注入 + 畸形 Markdown |
+| 性能基线 | `tests/test_perf.py` | 检索 P95 / SSE 首字 / 并发检索 |
+| CLI | `tests/test_cli.py` | 命令行入口与参数校验 |
+| 日志审计 | `tests/test_logging_audit.py` | 结构化日志 + 凭据脱敏审计 |
 
-- [ ] 更多工具：日历、邮件、数据库查询
-- [ ] MCP 接入扩展：按需暴露更多只读工具、工具级权限确认
+### 这套测试怎么做到"密封"
+
+测试结果**不依赖开发者本机环境**，靠三层封堵（都在 `tests/conftest.py`）：
+
+1. **`.env` 层**：会话级把 `dotenv.load_dotenv()` 换成空操作。原因：`config.py` 在
+   模块级 `load_dotenv()`，任何一次模块重导入都会把本机 `.env` 的**真实 Key** 灌回
+   `os.environ`，"删环境变量"式的隔离会被击穿 —— 本地全绿、CI 必红，而且本地那次
+   全绿是真去调了付费接口。
+2. **代理层**：把 `urllib.request.getproxies` 与 httpx 的 `get_environment_proxies`
+   全部置空。原因：Windows 上 `getproxies()` 会**回退读注册表**里的系统代理，
+   装了代理软件的机器上连"指向 127.0.0.1 的本地假模型服务"都会被绕出去拿到 502，
+   而失败信息看起来完全像产品缺陷。
+3. **网络层**：包装 `socket.connect`，只放行回环地址；需要真实外呼的用例必须显式
+   加 `@pytest.mark.allow_network`（该标记由 `_network_marker_gate` 真正读取）。
+   副作用目录（docs/index/generated/data/logs）全部隔离到临时目录。
+
+### 覆盖率：现状与**已知缺口**（主动披露）
+
+当前实测（`pytest --cov=. --cov-branch`）**总覆盖率约 80%**，门禁卡在 70%。但更需要
+说清楚的是**哪些地方没有被覆盖**，而不是一个总数：
+
+| 模块 | 覆盖率 | 缺口说明 |
+|---|---|---|
+| `server.py` | ~67% | 读接口与写接口主体已覆盖；**未覆盖**：会话导出（`/api/sessions/{id}/export`）、配置热更新 `/api/config` 的完整校验分支、`/api/mode` 的 ollama 可用性探测 |
+| `graph.py` | ~87% | `_build_sources`/`_grounded`/`_estimate_cost` 等纯函数覆盖充分；**未覆盖**：部分流式异常分支与 recursion limit 边界 |
+| `tools.py` | ~78% | `fetch_url` 白名单/重定向/超限分支、`write_file` 的部分 OSError 分支 |
+| `mcp_server.py` | ~75% | stdio/HTTP 双模式的进程级启动未覆盖（需真起 MCP 客户端） |
+| `retriever.py` | ~87% | jieba 缺失时的 bigram 降级、语义编码器异常路径 |
+| `static/index.html` | 由 E2E 覆盖 | 1582 行自写渲染器；E2E 覆盖金路径 + XSS/畸形输入，**未覆盖**：代码块执行、设置面板、上传 UI |
+| `desktop.py` | 0%（omitted） | pywebview 窗口需真实 GUI，故排除在统计外 |
+
+> 之所以把缺口写出来：报一个 80% 却不说缺在哪，等于让对方自己去发现这些洞 ——
+> 那时信任就崩了。**覆盖率回答"代码有没有被执行"，变异测试才回答"测试能不能抓住
+> bug"**，因此本项目额外配了 `[tool.mutmut]`（对 `approvals.py` / `retriever.py`
+> 做变异测试），作为对"覆盖率虚高"的正面回应。
+
+### 已知限制与路线图
+
+- [ ] **前端 E2E 首跑需人工确认一次**：用例与独立 CI job 已就位，但选择器依赖当前
+  前端 DOM（`#question` / `#askBtn` / `.answer-body` / `.sources .source-card`）。
+  首次在 CI 跑通后建议固定下来；改动前端结构时记得同步。
+- [ ] **命令执行未做真沙箱**（C7）：目前是"黑名单启发式 + 高危确认 + 超时强杀 +
+  目录边界"，不是隔离。计划：子进程 CPU/内存/进程数限制，高危命令走一次性 Docker
+  容器，可选关闭子进程网络。
+- [ ] **工具生态扩展**（C8）：表格读写（CSV/Excel）、Python 沙箱执行、正文提取式
+  抓取、cross-encoder rerank（直接用 C1 的指标衡量收益）。
+- [ ] **会话管理**（C5）：导出目前支持 markdown/json，待补重命名与游标分页。
+- [ ] **OpenAPI + 属性测试**（B8）：给 `/api/*` 补 OpenAPI 定义，用 `schemathesis`
+  自动生成畸形请求打接口。
 
 ## License
 

@@ -5,6 +5,8 @@
 - get_weather: 查询指定城市实时天气
 - write_file: 把内容写入本地文件（限制在 WRITE_DIR 目录内）
 """
+import hashlib
+import time
 from pathlib import Path
 
 import urllib.request
@@ -12,7 +14,10 @@ import urllib.request
 from langchain_core.tools import tool
 
 from config import BOCHA_API_KEY, TOP_K
+from logging_setup import audit, get_logger
 from retriever import search as _search_docs
+
+logger = get_logger(__name__)
 
 
 @tool
@@ -319,8 +324,16 @@ def _bocha_search(query: str, max_results: int = 5) -> list[dict]:
     return results
 
 def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
-    """DuckDuckGo 搜索（英文较好，中文一般）。"""
-    from duckduckgo_search import DDGS
+    """DuckDuckGo 搜索（英文较好，中文一般）。
+
+    包名兼容：上游已把 `duckduckgo-search` 改名为 `ddgs`（旧包不再维护）。
+    这里优先用新包名，同时保留旧包名回退 —— 否则"已按旧 requirements 装好环境的
+    用户"升上代码后会直接 ImportError。依赖变更不应变成破坏性升级。
+    """
+    try:
+        from ddgs import DDGS
+    except ImportError:  # 旧包名（duckduckgo-search <= 8.x）
+        from duckduckgo_search import DDGS
 
     with DDGS(timeout=10) as ddgs:
         raw = list(ddgs.text(query, region="cn-zh", max_results=max_results))
@@ -419,14 +432,18 @@ _BLOCKED_PATTERNS = [
     r"\bformat\s+[a-z]:",
     r"\bshutdown\b", r"\breboot\b", r"\bhalt\b",
     r"\bmkfs\b", r"\bdd\s+if=",
-    r"rd\s+/s\s+[a-z]:\\",
-    r"\brmdir\s+/s",
+    # 原实现是 r"rd\s+/s\s+[a-z]:\\\\"，缺词边界：像 "guard /s c:\\" 这类
+    # 无关命令的中间片段也会误命中。补上 \b 后只匹配真正的 rd/rmdir 命令。
+    r"\brd\b\s+/s\s+[a-z]:\\",
+    r"\brmdir\b\s+/s",
 ]
 
 # 高危命令模式：需要用户在前端确认后才执行（confirmed=True）
 # 覆盖：删除文件/目录、移动/重命名、安装包、联网下载、注册表、系统设置
+# 说明：黑名单只做"拦最显眼的破坏性操作"，真正的护栏是审批登记 + 超时强杀 +
+# 目录边界（见 run_command 内的风险说明）。
 _HIGH_RISK_PATTERNS = [
-    r"\brm\b", r"\bdel\b", r"\bremove\b", r"\brmdir\b", r"\brmdir\b",
+    r"\brm\b", r"\bdel\b", r"\bremove\b", r"\brmdir\b",
     r"\bmove\b", r"\bren\b", r"\brename\b", r"\bcopy\b", r"\bxcopy\b", r"\brobocopy\b",
     r"\bpip\s+install\b", r"\bnpm\s+install\b", r"\bconda\s+install\b",
     r"\bcurl\b", r"\bwget\b", r"\bInvoke-WebRequest\b",
@@ -471,16 +488,26 @@ def run_command(command: str, input_text: str = "", confirmed: bool = False) -> 
     from config import WRITE_DIR
 
     cwd = str(Path(WRITE_DIR).resolve())
+    started = time.time()
+    # 命令哈希而非明文入库：审计需要"能对应到同一条命令"，但不必把用户
+    # 可能含敏感参数的完整命令写进日志文件
+    cmd_hash = hashlib.sha256(command.encode("utf-8")).hexdigest()[:16]
 
     # 1. 黑名单硬拦截
     for pat in _BLOCKED_PATTERNS:
         if re.search(pat, command, re.IGNORECASE):
+            audit("run_command", command_hash=cmd_hash, command_preview=command[:120],
+                  blocked=True, reason="blocked_pattern", pattern=pat,
+                  duration_ms=int((time.time() - started) * 1000))
             return f"⛔ 已拦截：命令包含破坏性操作（{pat}），禁止执行"
 
     # 2. 高危命令需要确认
     is_high_risk = any(re.search(p, command, re.IGNORECASE) for p in _HIGH_RISK_PATTERNS)
     if is_high_risk:
         if not confirmed:
+            audit("run_command", command_hash=cmd_hash, command_preview=command[:120],
+                  high_risk=True, outcome="need_confirm", approved=False,
+                  duration_ms=int((time.time() - started) * 1000))
             return (
                 "NEED_CONFIRM 需要用户确认：高危命令 "
                 f"[{command}] 是否执行？请等待用户确认。"
@@ -490,6 +517,10 @@ def run_command(command: str, input_text: str = "", confirmed: bool = False) -> 
         from approvals import is_approved
 
         if not is_approved(command):
+            audit("run_command", command_hash=cmd_hash, command_preview=command[:120],
+                  high_risk=True, outcome="need_confirm", approved=False,
+                  reason="model_self_confirmed_without_approval",
+                  duration_ms=int((time.time() - started) * 1000))
             return (
                 "NEED_CONFIRM 未获用户批准：高危命令 "
                 f"[{command}] 没有对应的批准记录。请等待用户在前端确认。"
@@ -533,19 +564,41 @@ def run_command(command: str, input_text: str = "", confirmed: bool = False) -> 
                     proc.kill()
             except Exception:  # noqa: BLE001
                 pass
+            audit("run_command", command_hash=cmd_hash, command_preview=command[:120],
+                  high_risk=is_high_risk, outcome="timeout",
+                  timeout_s=_COMMAND_TIMEOUT,
+                  duration_ms=int((time.time() - started) * 1000))
             return (
                 f"⏱ 命令超时（>{_COMMAND_TIMEOUT}s），已终止：{command}。"
                 "若程序在等待 input() 输入，请通过 input_text 参数提供输入（每行一个，换行分隔）后重试。"
             )
         result = proc
     except Exception as exc:  # noqa: BLE001
+        logger.exception("命令启动失败：%s", command[:120])
+        audit("run_command", command_hash=cmd_hash, command_preview=command[:120],
+              high_risk=is_high_risk, outcome="spawn_error", error=str(exc)[:200],
+              duration_ms=int((time.time() - started) * 1000))
         return f"执行失败: {exc}"
 
-    out = (stdout or "") + (stderr or "")
-    out = out.strip()
+    # stdout 与 stderr 分开呈现。
+    # 修复的问题：原实现 `out = (stdout or "") + (stderr or "")` 把两股流糊在一起，
+    # 报错时既看不出哪段是标准输出、哪段是错误信息，也让退出码 0 但 stderr 有警告的
+    # 情况难以排查。
+    stdout = (stdout or "").strip()
+    stderr = (stderr or "").strip()
+    sections = []
+    if stdout:
+        sections.append(stdout)
+    if stderr:
+        sections.append(f"--- stderr ---\n{stderr}")
+    out = "\n".join(sections)
     if len(out) > _MAX_OUTPUT:
         out = out[:_MAX_OUTPUT] + f"\n…（输出已截断，共 {len(out)} 字符）"
     status = f"✅ 执行成功（exit {result.returncode}）" if result.returncode == 0 else f"❌ 执行失败（exit {result.returncode}）"
+    audit("run_command", command_hash=cmd_hash, command_preview=command[:120],
+          high_risk=is_high_risk, approved=bool(is_high_risk), outcome="executed",
+          exit_code=result.returncode, stdout_len=len(stdout), stderr_len=len(stderr),
+          duration_ms=int((time.time() - started) * 1000))
     return f"{status}\n{out}" if out else status
 
 

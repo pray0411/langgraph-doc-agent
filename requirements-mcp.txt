@@ -1,2 +1,14 @@
-# MCP Server 可选依赖（mcp_server.py）
+# MCP 可选依赖
+#
+# 安装：pip install -r requirements-mcp.txt
+#
+# 覆盖两个入口：
+#   mcp_server.py —— 把本项目的能力暴露为 MCP Server（用 fastmcp）
+#   mcp_demo.py   —— MCP Client 演示脚本，需要 `from mcp import ClientSession`
+#
+# 此前这里只声明了 fastmcp：它虽然会**间接**带上 mcp，但
+# "照文档装依赖 → 跑 mcp_demo.py 却 ImportError" 是真实发生过的坑。
+# 直接依赖必须显式声明，不能靠传递依赖碰运气。
+
 fastmcp==4.0.3
+mcp==1.22.0

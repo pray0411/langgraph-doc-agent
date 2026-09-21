@@ -1,0 +1,56 @@
+# 依赖自动更新
+#
+# 为什么个人项目也该有：AI 生态（langchain / langgraph / openai）迭代极快，
+# 上游破坏性变更与安全补丁都很频繁。靠人肉盯 changelog 一定会漏。
+# Dependabot 把"该升级了"变成一个可 review、可回滚的 PR。
+
+version: 2
+updates:
+  # Python 依赖
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # langchain 生态内部版本互相耦合，拆成多个 PR 会互相冲突、
+      # 且分开升级往往跑不过 —— 打成一个 PR 一起升。
+      langchain-stack:
+        patterns:
+          - "langchain*"
+          - "openai*"
+          - "langgraph*"
+    ignore:
+      # 测试框架的大版本升级会一次带来大量用例改动，单独排期处理，
+      # 不让它混进日常依赖更新里。
+      - dependency-name: "pytest"
+        update-types: ["version-update:semver-major"]
+
+  # GitHub Actions 自身
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "chore(ci)"
+
+  # 容器基础镜像
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: monthly
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: "chore(docker)"

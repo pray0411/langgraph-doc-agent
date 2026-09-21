@@ -13,6 +13,7 @@ V2 说明：架构从 V1 的"规则路由 + 人工确认 + 反思"演进为 ReAc
 人工确认与反思改由模型在循环内自然处理（工具结果即观察）。对外保留 reflection
 字段供前端展示过程信息。
 """
+import os
 import re
 import threading
 import uuid
@@ -26,8 +27,10 @@ from langchain_openai import ChatOpenAI
 # 迁移要点：prompt= 改名为 system_prompt=；其余参数（model/tools/checkpointer）不变。
 from langchain.agents import create_agent
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.errors import GraphRecursionError
 
 from config import LLM_MODEL, LLM_PROVIDER, MEMORY_DB
+from logging_setup import audit, get_logger
 from prompts import SYSTEM_PROMPT
 from tools import (
     edit_file,
@@ -44,6 +47,13 @@ from tools import (
     web_search,
     write_file,
 )
+
+logger = get_logger(__name__)
+
+# 单轮最多允许的图迭代次数：create_agent 默认递归上限 25，这里显式收紧到
+# 一个"业务上够用、失控时能及时止损"的值，并由 ask/ask_stream 捕获
+# GraphRecursionError 转成可读提示（而不是把栈丢给用户）。
+RECURSION_LIMIT = int(os.getenv("RECURSION_LIMIT", "25"))
 
 
 class AgentResult(TypedDict, total=False):
@@ -85,66 +95,74 @@ def get_memory() -> SqliteSaver:
 
 # agent 构建缓存：按 provider 缓存，避免每次提问重建（create_agent 有开销）。
 # 缓存键 = (provider, 运行时配置版本号)——网页端换 Key/模型后版本号变化，自动重建。
-# 缓存值 = agent；usage 回调 handler 挂在 agent.__usage_handler 上随缓存保存。
 _agent_cache: dict[tuple[str, int], object] = {}
 _agent_cache_lock = threading.Lock()
 
 
+def reset_state() -> None:
+    """重置进程内单例（测试隔离用）：关闭 checkpointer 连接并清空 agent 缓存。
+
+    没有这一步，用例之间会共享同一个 SQLite 连接与同一批 agent 实例：
+    前一个用例留下的会话/用量会渗进后一个用例（flaky 的典型来源），
+    而未关闭的连接还会在解释器退出时留下 `ResourceWarning: unclosed database`。
+    """
+    global _memory
+    with _memory_lock:
+        if _memory is not None:
+            try:
+                conn = getattr(_memory, "conn", None)
+                if conn is not None:
+                    conn.close()
+            except Exception:  # noqa: BLE001 - 关闭失败不应影响测试复位
+                pass
+            _memory = None
+    with _agent_cache_lock:
+        _agent_cache.clear()
+
+
 class _UsageCapture(BaseCallbackHandler):
-    """LangChain 回调：在 on_llm_end 捕获 token 用量，按会话（thread_id）累计。
+    """LangChain 回调：捕获 token 用量，**按单次请求**累计。
 
     LangGraph 的 stream 模式会剥离 response_metadata 中的 usage（updates 流
-    与 checkpoint 都不含），但 on_llm_end 回调能拿到完整 llm_output——这是
+    与 checkpoint 都不含），但 on_llm_end 回调能拿到完整 llm_output —— 这是
     流式路径下获取 token 用量的唯一可靠途径。
 
-    由于 agent 按 provider 缓存、多线程共享同一 handler，用 thread_id 区分
-    会话：每次调用的 usage 累加到对应会话，避免跨请求串值；单次读后即取
-    （ask/ask_stream 结束时通过 _usage_of 读取该会话的累计值）。
+    修复的问题：此前 handler 被挂在第三方对象上（`agent.__usage_handler`）
+    并随 agent 缓存复用，只能靠 `threading.local` 记录"当前是哪个会话"。
+    那样做有三处脆弱：给第三方对象挂私有属性、并发/异步下线程局部变量
+    并不可靠、读一次就清空（`get()`）使重试路径拿不到数据。
+    现在**每次请求新建一个 handler**，通过 LangGraph 原生
+    `config={"callbacks": [...]}` 逐次注入 —— 天然按请求隔离，
+    `threading.local` 整套可以删掉。
     """
 
     def __init__(self):
-        self._by_thread: dict[str, dict] = {}
         self._lock = threading.Lock()
-        # 当前线程正在服务的 thread_id（ask/ask_stream 调用前设置，
-        # 回调在同一线程执行，可直接读取；比从 callback metadata 取更可靠）
-        self._thread_local = threading.local()
-
-    def set_current_thread(self, thread_id: str) -> None:
-        self._thread_local.thread_id = thread_id
+        self._totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        self._calls = 0
 
     def on_llm_end(self, response, **kwargs) -> None:  # noqa: N802
         llm_output = getattr(response, "llm_output", None) or {}
         usage = llm_output.get("token_usage") or llm_output.get("usage") or {}
         if not (isinstance(usage, dict) and usage.get("total_tokens")):
             return
-        thread_id = getattr(self._thread_local, "thread_id", "default")
         with self._lock:
-            acc = self._by_thread.setdefault(thread_id, {
-                "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
-            })
-            acc["prompt_tokens"] += usage.get("prompt_tokens", 0)
-            acc["completion_tokens"] += usage.get("completion_tokens", 0)
-            acc["total_tokens"] += usage.get("total_tokens", 0)
+            self._totals["prompt_tokens"] += usage.get("prompt_tokens") or 0
+            self._totals["completion_tokens"] += usage.get("completion_tokens") or 0
+            self._totals["total_tokens"] += usage.get("total_tokens") or 0
+            self._calls += 1
 
-    def get(self, thread_id: str) -> dict | None:
-        """读取指定线程的本轮累计用量，读取后清零（一次性消费）。
-
-        这样前端"过程详情"显示的是**本轮** token 用量而非历史总和；
-        同时清理记录防止 _by_thread 无限增长。
-        """
+    def total(self) -> dict | None:
+        """本轮累计用量；一次模型调用都没捕获到则返回 None（调用方降级为估算）。"""
         with self._lock:
-            acc = self._by_thread.get(thread_id or "default")
-            if acc is None:
+            if not self._calls:
                 return None
-            result = dict(acc)
-            del self._by_thread[thread_id or "default"]  # 读完即清，防内存泄漏
-            return result
+            return dict(self._totals)
 
 
-def _usage_of(agent, thread_id: str = "") -> dict | None:
-    """从 agent 上取指定会话的累计 token 用量。"""
-    handler = getattr(agent, "__usage_handler", None)
-    return handler.get(thread_id) if handler else None
+def _new_usage_capture() -> _UsageCapture:
+    """usage 回调工厂：测试可替换此函数注入桩 handler。"""
+    return _UsageCapture()
 
 
 def _estimate_tokens_from_text(text: str) -> int:
@@ -199,8 +217,6 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
 
     from config import OLLAMA_BASE_URL, OLLAMA_MODEL
 
-    usage_handler = _UsageCapture()
-
     if provider == "ollama":
         # 本地 Ollama 模型：OpenAI 兼容接口，无需 API Key
         model = ChatOpenAI(
@@ -208,16 +224,13 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
             api_key="ollama",  # Ollama 忽略 Key，占位即可
             base_url=OLLAMA_BASE_URL,
             temperature=0.3,
-            callbacks=[usage_handler],
         )
     else:
         # 在线模式：从 provider 配置统一获取（网页端可动态更换 Key）
-        from config import LLM_BASE_URL, get_provider_config
+        from config import get_provider_config
         pcfg = get_provider_config(provider)
         api_key = pcfg.get("api_key") or "empty-key-placeholder"
-        # LLM_BASE_URL 作为全局兜底（未在 provider 配置里指定时生效），
-        # 支持自定义 OpenAI 兼容网关，如 one-api / vLLM。
-        base_url = pcfg.get("base_url") or LLM_BASE_URL or "https://api.deepseek.com/v1"
+        base_url = _resolve_base_url(pcfg)
         model_name = pcfg.get("model") or LLM_MODEL
 
         model = ChatOpenAI(
@@ -225,7 +238,6 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
             api_key=api_key,
             base_url=base_url,
             temperature=0.3,
-            callbacks=[usage_handler],
         )
 
     agent = create_agent(
@@ -241,13 +253,32 @@ def build_agent(mode: str | None = None, memory: SqliteSaver | None = None):
         # 记忆变化由缓存 key 版本驱动自动重建
         system_prompt=_system_prompt_with_memory(),
     )
-    # 挂 usage 回调供 _usage_of 读取（随 agent 缓存一起保存）
-    agent.__usage_handler = usage_handler  # type: ignore[attr-defined]
+    # 说明：usage 回调不再挂在 agent 上。原实现 `agent.__usage_handler = ...`
+    # 给第三方对象挂私有属性并随缓存复用，靠 threading.local 区分会话；
+    # 现在改为每次请求新建 handler + config callbacks 注入（见 _UsageCapture）。
 
     if memory is None:
         with _agent_cache_lock:
             _agent_cache[cache_key] = agent
     return agent
+
+
+def _resolve_base_url(pcfg: dict) -> str:
+    """解析模型 base_url，优先级：运行时显式设置 > LLM_BASE_URL > 服务商预设默认。
+
+    修复的问题：原实现是 `pcfg.get("base_url") or LLM_BASE_URL or 默认`，
+    而 `config.get_provider_config()` 在 6 个预设 provider 下**永远**返回非空
+    base_url，于是 `or LLM_BASE_URL` 是**死代码** —— `.env.example` 与 README
+    承诺的"自定义 OpenAI 兼容网关（one-api / vLLM）"实际根本用不了，
+    用户设了这个变量也不会生效（且不会有任何报错，只是静默走默认地址）。
+
+    现在按"显式程度"排序：网页端本次运行手填的地址最具体，其次是环境变量，
+    最后才是服务商预设默认值。
+    """
+    explicit = (pcfg.get("base_url") or "").strip()
+    if pcfg.get("source") == "runtime" and explicit:
+        return explicit
+    return os.getenv("LLM_BASE_URL", "").strip() or explicit or "https://api.deepseek.com/v1"
 
 
 def ask(
@@ -266,11 +297,8 @@ def ask(
     history: 可选，兼容参数。传了 thread_id 时建议忽略（checkpointer 已含历史）。
     """
     agent = build_agent(mode)
-
-    # 标记当前线程的会话（usage 回调按此累计，防跨请求串值）
-    handler = getattr(agent, "__usage_handler", None)
-    if handler is not None:
-        handler.set_current_thread(thread_id or "default")
+    # 每次请求一个新的 usage 回调：按请求隔离，用完即弃（见 _UsageCapture）
+    usage_handler = _new_usage_capture()
 
     # 组装消息：历史 + 当前问题（无 thread_id 时才需要手动拼历史）
     messages_in = []
@@ -286,13 +314,30 @@ def ask(
         thread_id = temp_thread
     # metadata 里记录本次会话的服务商：历史回放按"会话当时的 provider"估算成本，
     # 而不是用回放那一刻的当前 provider（Codex 三轮遗留点）
-    result = agent.invoke(
-        {"messages": messages_in},
-        config={
-            "configurable": {"thread_id": thread_id},
-            "metadata": {"provider": mode or LLM_PROVIDER},
-        },
-    )
+    try:
+        result = agent.invoke(
+            {"messages": messages_in},
+            config={
+                "configurable": {"thread_id": thread_id},
+                "metadata": {"provider": mode or LLM_PROVIDER},
+                "callbacks": [usage_handler],
+                "recursion_limit": RECURSION_LIMIT,
+            },
+        )
+    except GraphRecursionError:
+        # 模型陷入"调用工具 → 观察 → 再调用"的循环：给出可读提示，
+        # 而不是把 GraphRecursionError 的栈丢给用户（server 层会当成 500）
+        logger.warning("工具调用达到迭代上限 recursion_limit=%s thread=%s",
+                       RECURSION_LIMIT, thread_id)
+        audit("agent_recursion_limit", thread_id=thread_id, limit=RECURSION_LIMIT)
+        if temp_thread:
+            delete_session(temp_thread)
+        return (
+            "本轮工具调用次数达到上限，已停止执行。"
+            "建议把问题拆成更小的步骤，或直接说明你想得到的结论。",
+            {"answer": "", "messages": [], "reflection": "", "sources": [],
+             "usage": None, "cost": None},
+        )
     if temp_thread:
         delete_session(temp_thread)
     messages = result.get("messages", [])
@@ -304,10 +349,13 @@ def ask(
     answer = last.get("content", "") if isinstance(last, dict) else getattr(last, "content", "")
     answer = str(answer)
 
-    # 提取过程日志与真实工具调用（基于 AIMessage.tool_calls 元数据，而非字符串猜测）
+    # 只统计**本轮**消息：带 checkpointer 时 result["messages"] 是整个 thread 的
+    # 累积历史，全量提取会把历史轮次的工具调用也算进来 —— 表现为"这一问没有
+    # 调用任何工具，来源卡片却显示上一轮的文档"。
+    turn_messages = _current_turn_messages(messages)
     log = []
-    tool_calls = _extract_tool_calls(messages)
-    for m in messages:
+    tool_calls = _extract_tool_calls(turn_messages)
+    for m in turn_messages:
         role = m.get("role", "") if isinstance(m, dict) else getattr(m, "type", "")
         content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
         if role in ("ai", "assistant") and content:
@@ -320,8 +368,10 @@ def ask(
 
     if show_log:
         for line in log:
-            print(line)
-    usage = _usage_of(agent, thread_id)
+            logger.info("%s", line)
+    usage = usage_handler.total()
+    logger.info("ask 完成 provider=%s thread=%s 工具=%d 回答长度=%d",
+                mode or LLM_PROVIDER, thread_id, len(tool_calls), len(answer))
     return answer, {
         "answer": answer,
         "messages": log,
@@ -353,6 +403,8 @@ def ask_stream(
     checkpoint 都会剥离 usage 元数据，回调是流式路径下获取用量的唯一途径。
     """
     agent = build_agent(mode)
+    # 每次请求一个新的 usage 回调（见 _UsageCapture 的说明）
+    usage_handler = _new_usage_capture()
 
     messages_in = [{"role": "user", "content": question}]
     # checkpointer 强制要求 thread_id：无会话标识时用一次性临时 id（用完删除）
@@ -364,12 +416,9 @@ def ask_stream(
         "configurable": {"thread_id": thread_id},
         # 记录会话当时的 provider，供历史回放成本估算使用（见 get_session_messages）
         "metadata": {"provider": mode or LLM_PROVIDER},
+        "callbacks": [usage_handler],
+        "recursion_limit": RECURSION_LIMIT,
     }
-
-    # 标记当前线程的会话（usage 回调按此累计，防跨请求串值）
-    handler = getattr(agent, "__usage_handler", None)
-    if handler is not None:
-        handler.set_current_thread(thread_id)
 
     yield {"type": "start", "mode": mode or LLM_PROVIDER}
 
@@ -418,18 +467,30 @@ def ask_stream(
                 for payload in (item or {}).values():
                     if isinstance(payload, dict):
                         all_messages.extend(payload.get("messages", []) or [])
+    except GraphRecursionError:
+        logger.warning("流式：工具调用达到迭代上限 recursion_limit=%s thread=%s",
+                       RECURSION_LIMIT, thread_id)
+        audit("agent_recursion_limit", thread_id=thread_id, limit=RECURSION_LIMIT,
+              stream=True)
+        yield {"type": "error", "message": "本轮工具调用次数达到上限，已停止执行。建议把问题拆小一些。"}
+        if temp_thread:
+            delete_session(temp_thread)
+        return
     except Exception as exc:  # noqa: BLE001
+        logger.exception("流式问答失败 thread=%s", thread_id)
         yield {"type": "error", "message": str(exc)}
         if temp_thread:
             delete_session(temp_thread)
         return
 
     answer = "".join(text_parts)
-    tool_calls = _extract_tool_calls(all_messages)
+    # 只统计本轮：流式路径的 all_messages 虽来自本次 stream，但为防御性一致，
+    # 仍按"最后一条 human 消息"切分（与 ask() 保持同一口径）
+    tool_calls = _extract_tool_calls(_current_turn_messages(all_messages))
     reflection = _build_reflection(question, answer, tool_calls, mode or LLM_PROVIDER)
     # 用量：优先回调精确值（非流式 invoke 路径）；流式路径 deepseek 不返回 usage，
     # 降级为按文本长度估算并标注 estimated
-    usage = _usage_of(agent, thread_id)
+    usage = usage_handler.total()
     estimated = False
     if usage is None and answer:
         total = _estimate_tokens_from_text(answer)
@@ -523,6 +584,23 @@ def _extract_tool_calls(messages: list) -> list[dict]:
         call["result"] = result
 
     return calls
+
+
+def _current_turn_messages(messages: list) -> list:
+    """切出"本轮"消息：从最后一条 human 消息开始，到末尾为止。
+
+    为什么必须切：带 checkpointer 时 `agent.invoke()["messages"]` 返回的是
+    **整个 thread 的累积历史**。直接全量提取工具调用，会把历史轮次的调用
+    也算进本轮统计 —— 用户看到的现象是"这一问根本没查文档，来源卡片却显示
+    上一轮的文档、过程详情里工具调用数为 1"。sources / reflection / 过程日志
+    都依赖这个口径，因此统一在这里切分。
+
+    异常兜底：找不到 human 消息时退回全量（与旧行为一致，不制造新的失败面）。
+    """
+    for idx in range(len(messages) - 1, -1, -1):
+        if _message_type(messages[idx]) in ("human", "user"):
+            return list(messages[idx:])
+    return list(messages)
 
 
 def _compact(text: str) -> str:
@@ -628,17 +706,26 @@ def list_sessions(limit: int = 50) -> list[dict]:
     从 checkpointer 读取每个 thread 的最新 checkpoint，
     用第一条用户消息作标题、checkpoint 的 ts 字段作更新时间。
     返回: [{"thread_id", "title", "updated_at", "message_count"}, ...]
+
+    性能说明：原实现每次请求都 `saver.list(None)` **全量遍历所有历史
+    checkpoint** 再去重取最新，会话一多就是 O(全部历史)。这里利用
+    SqliteSaver.list 的公开契约（`ORDER BY checkpoint_id DESC`，而
+    checkpoint_id 是时间有序的）**提前收敛**：一旦已收集到 limit 个不同
+    thread，后面出现的 thread 最新活动一定更早，不可能进入 top-N，直接
+    停止遍历。复杂度从 O(全部历史) 降到 O(limit 附近)。
     """
     saver = get_memory()
-    # list(None) 返回全部 thread 的所有历史 checkpoint，顺序为最新在前；
-    # 用 setdefault 保留每个 thread 的第一条（即最新）checkpoint
     latest: dict[str, object] = {}
     with _memory_access_lock:
         for t in saver.list(None):
             thread_id = (t.config.get("configurable") or {}).get("thread_id", "")
             if not thread_id:
                 continue
-            latest.setdefault(thread_id, t)
+            if thread_id in latest:
+                continue
+            latest[thread_id] = t
+            if len(latest) >= limit:
+                break
 
     sessions = []
     for thread_id, t in latest.items():
@@ -677,14 +764,20 @@ def get_session_messages(thread_id: str, limit: int = 100, provider: str = "") -
     返回: [{"role": "user"|"assistant", "content", "tools", "sources"?, "reflection"?}, ...]
     """
     saver = get_memory()
-    # 该 thread 的最新 checkpoint（list 返回最新在前）
-    latest = None
+    # 该 thread 的最新 checkpoint。
+    # 用 checkpointer 的公开 API `get_tuple(config)`（内部是
+    # `WHERE thread_id = ? ORDER BY checkpoint_id DESC LIMIT 1`），
+    # 替代原实现"全量 list(None) 再线性找第一个匹配 thread"的 O(全部历史) 扫描。
     with _memory_access_lock:
-        for t in saver.list(None):
-            tid = (t.config.get("configurable") or {}).get("thread_id", "")
-            if tid == thread_id:
-                latest = t
-                break
+        try:
+            latest = saver.get_tuple({"configurable": {"thread_id": thread_id}})
+        except Exception:  # noqa: BLE001 - 旧版/自定义 checkpointer 无 get_tuple 时降级
+            latest = None
+            for t in saver.list(None):
+                tid = (t.config.get("configurable") or {}).get("thread_id", "")
+                if tid == thread_id:
+                    latest = t
+                    break
     if latest is None:
         return []
 
