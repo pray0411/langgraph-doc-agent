@@ -633,31 +633,70 @@ def _build_sources(tool_calls: list[dict]) -> list[dict]:
 
 
 def _extract_tool_calls(messages: list) -> list[dict]:
-    """从消息序列中提取真实的工具调用记录。
+    """从消息序列中提取真实的工具调用记录，并把结果与调用**按 id 对齐**。
 
-    来源：AIMessage.tool_calls 元数据（name/args 由模型结构化输出，可靠）。
-    返回: [{"name": str, "args": dict|str, "result": str}, ...]
+    来源：AIMessage.tool_calls（name/args/id 由模型结构化输出，可靠）+
+    ToolMessage.tool_call_id（结果侧的对应标识）。
+
+    为什么不能按位置 `zip(calls, results)`：
+        一次调用若没有产出 ToolMessage —— 异常中断、流式截断、并发工具节点
+        乱序返回 —— 位置对齐会让**后续所有**结果整体错位，表现为来源卡片
+        张冠李戴、grounded 取到别的工具的输出。`strict=False` 只保证不抛异常，
+        不保证对齐正确。
+        正确做法是用 id 配对：结果跟着它自己的调用走，缺哪条就只缺哪条。
+
+    兜底：旧数据或未提供 id 的 provider 退回"按出现顺序"配对，并在该条上标记
+    `matched_by="position"` —— 降级路径必须可被调用方与测试识别，而不是静默发生。
+
+    返回: [{"name", "args", "id", "result", "matched_by"}, ...]
     """
     calls: list[dict] = []
-    # 第一遍：AIMessage.tool_calls 元数据（真实来源）
     for m in messages:
         tcs = getattr(m, "tool_calls", None)
         if not tcs:
             continue
         for tc in tcs:
-            name = tc.get("name", "")
-            args = tc.get("args", {})
-            calls.append({"name": name, "args": args, "result": ""})
+            calls.append({
+                "name": tc.get("name", ""),
+                "args": tc.get("args", {}),
+                "id": str(tc.get("id") or ""),
+                "result": "",
+                "matched_by": "",
+            })
 
-    # 第二遍：把 tool 角色的结果文本按顺序回填到对应调用
-    results: list[str] = []
+    # 结果侧：同时保留 id 索引与出现顺序（顺序仅用于兜底）
+    results_by_id: dict[str, str] = {}
+    results_in_order: list[str] = []
     for m in messages:
         role = m.get("role", "") if isinstance(m, dict) else getattr(m, "type", "")
-        if role == "tool":
-            content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
-            results.append(str(content))
-    for call, result in zip(calls, results, strict=False):
+        if role != "tool":
+            continue
+        content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+        content = str(content)
+        results_in_order.append(content)
+        tcid = m.get("tool_call_id", "") if isinstance(m, dict) else getattr(m, "tool_call_id", "")
+        if tcid:
+            results_by_id[str(tcid)] = content
+
+    # 第一优先：按 tool_call_id 精确配对
+    consumed: list[str] = []
+    for call in calls:
+        cid = call["id"]
+        if cid and cid in results_by_id:
+            call["result"] = results_by_id[cid]
+            call["matched_by"] = "tool_call_id"
+            consumed.append(results_by_id[cid])
+
+    # 兜底：无 id（或 id 对不上）的调用，用剩余结果按顺序补齐并标记
+    rest_results = list(results_in_order)
+    for r in consumed:
+        try:
+            rest_results.remove(r)
+        except ValueError:
+            pass
+    for call, result in zip([c for c in calls if not c["matched_by"]], rest_results, strict=False):
         call["result"] = result
+        call["matched_by"] = "position"
 
     return calls
 
@@ -684,26 +723,88 @@ def _compact(text: str) -> str:
     return "".join(str(text).lower().split())
 
 
-def _grounded(answer: str, tool_calls: list[dict]) -> bool:
-    """检查回答是否基于工具结果（grounded）。
+# 工具结果中的模板/格式行前缀：命中这些行不代表"回答复用了工具内容"，
+# 它们只是工具自己拼接的说明文字（来源标注、执行状态、落盘回执等）。
+_TOOL_TEMPLATE_PREFIXES = (
+    "以下为检索到的文档片段",
+    "以下为搜索到的网页结果",
+    "以下为搜索到的",
+    "✅ 执行成功",
+    "❌ 执行失败",
+    "⏱ 命令超时",
+    "⛔ 已拦截",
+    "NEED_CONFIRM",
+    "已写入",
+    "已记住",
+    "已遗忘",
+    "内容（",
+    "README（",
+    "抓取失败",
+)
+_SOURCE_LINE_RE = re.compile(r"^\[\d+\]\s*来源[:：]")
 
-    方法：取每个工具结果中最长的连续字符片段（去空白），看是否出现在回答里。
-    片段长度阈值 MIN_GROUND_FRAGMENT（10 字符）排除了"来源"/"文档"这类
-    工具自己格式文本里的噪声词——只要回答确实复用了工具结果的内容就会命中。
-    没有工具调用时返回 False（纯对话，不存在 grounded 概念）。
-    """
-    MIN_GROUND_FRAGMENT = 10
-    answer_c = _compact(answer)
-    for call in tool_calls:
-        result_c = _compact(call.get("result", ""))
-        if len(result_c) < MIN_GROUND_FRAGMENT:
+# grounded 判据的置信阈值：工具净内容与回答的**最长公共子串**需达到该长度。
+# 取 16：中文里 16 个连续字符已是实质性复用（远高于"任意 10 字碎片命中"的
+# 巧合概率），同时又不会把"回答确实引用了工具内容"的正常情况判成否。
+GROUNDED_MIN_OVERLAP = 16
+
+
+def _content_only(text: str) -> str:
+    """剥离工具结果中的模板/格式行，只保留正文内容。"""
+    keep: list[str] = []
+    for line in str(text or "").splitlines():
+        s = line.strip()
+        if not s:
             continue
-        # 从结果中取最长的连续片段，滑动检测是否在回答中出现
-        for start in range(len(result_c) - MIN_GROUND_FRAGMENT + 1):
-            frag = result_c[start : start + MIN_GROUND_FRAGMENT]
-            if frag in answer_c:
-                return True
-    return False
+        if s.startswith(_TOOL_TEMPLATE_PREFIXES) or _SOURCE_LINE_RE.match(s):
+            continue
+        keep.append(s)
+    return "\n".join(keep)
+
+
+def grounded_detail(answer: str, tool_calls: list[dict]) -> dict:
+    """评估回答对工具结果的复用程度，返回**可核验的量化结果**。
+
+    判据：取工具结果**净内容**（剥离模板行）与回答的**最长公共子串**长度，
+    达到 GROUNDED_MIN_OVERLAP 记为 grounded。
+
+    为什么不用"任意 10 字符连续片段命中"：一段 500 字的工具结果能滑出约 490 个
+    候选片段，只要回答里含任何一句通用短语就会命中——那个判据在绝大多数情况下
+    恒为真，把它当"抗幻觉证据"展示比没有指标更有害。改为"最长公共子串 + 更高
+    阈值 + 剥模板"后，数字本身可被核对（返回 overlap 长度与片段）。
+
+    仍然要说清楚：这是**启发式**，衡量"文本复用程度"，不等于"事实正确性"。
+    回答可能复用了工具结果却仍是错的；也可能正确却未逐字复用。
+    """
+    import difflib
+
+    answer_c = _compact(answer)
+    best = 0
+    best_snippet = ""
+    for call in tool_calls:
+        content_c = _compact(_content_only(call.get("result", "")))
+        if len(content_c) < GROUNDED_MIN_OVERLAP:
+            continue
+        # SequenceMatcher.find_longest_match 为标准库实现，长文本上比纯 Python DP 快
+        m = difflib.SequenceMatcher(None, content_c, answer_c, autojunk=False).find_longest_match(
+            0, len(content_c), 0, len(answer_c)
+        )
+        if m.size > best:
+            best = m.size
+            best_snippet = content_c[m.a : m.a + m.size]
+    return {
+        "grounded": best >= GROUNDED_MIN_OVERLAP,
+        "overlap_chars": best,
+        "overlap_snippet": best_snippet[:40],
+        "threshold": GROUNDED_MIN_OVERLAP,
+        "method": "longest_common_substring",
+        "is_heuristic": True,
+    }
+
+
+def _grounded(answer: str, tool_calls: list[dict]) -> bool:
+    """grounded 布尔（兼容旧调用点）；细节见 grounded_detail()。"""
+    return grounded_detail(answer, tool_calls)["grounded"]
 
 
 def _build_reflection(question: str, answer: str, tool_calls: list[dict], mode: str) -> str:
@@ -719,6 +820,10 @@ def _build_reflection(question: str, answer: str, tool_calls: list[dict], mode: 
     used_web_search = any(n == "web_search" for n in names)
     used_weather = any(n == "get_weather" for n in names)
 
+    # 结果对齐来源：位置对齐是降级路径，必须可被看见（见 _extract_tool_calls）
+    aligned_by_position = [c for c in tool_calls if c.get("matched_by") == "position"]
+    ground = grounded_detail(answer, tool_calls)
+
     reflection = {
         "问题": question,
         "运行模式": mode,
@@ -727,9 +832,17 @@ def _build_reflection(question: str, answer: str, tool_calls: list[dict], mode: 
         "使用文档检索": used_doc_search,
         "使用联网搜索": used_web_search,
         "使用天气查询": used_weather,
-        "回答是否基于工具结果": _grounded(answer, tool_calls),
+        "工具结果对齐方式": "tool_call_id" if not aligned_by_position else "position(降级)",
+        "回答是否基于工具结果": ground["grounded"],
+        "回答与工具结果最长公共片段": ground["overlap_chars"],
         "回答长度": len(answer),
-        "说明": "工具调用取自 AIMessage.tool_calls 元数据；grounded 基于回答对工具结果连续片段的复用检查",
+        "说明": (
+            "工具调用取自 AIMessage.tool_calls 元数据，结果按 tool_call_id 对齐"
+            "（无 id 时降级为位置对齐并在此标注）；"
+            f"'回答是否基于工具结果'为启发式判据：剥离工具模板文本后，回答与工具结果的"
+            f"最长公共子串需达到 {ground['threshold']} 字符。它衡量文本复用程度，"
+            "不代表事实正确性。"
+        ),
     }
     return _json.dumps(reflection, ensure_ascii=False, indent=2)
 

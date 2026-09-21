@@ -342,15 +342,41 @@ def test_version_has_a_single_source():
 
 
 def test_read_version_reads_file_and_falls_back(monkeypatch, tmp_path):
-    """`config._read_version` 的两条路径都要成立：读到就用，读不到不能炸。"""
+    """`config._read_version` 的两条路径都要成立：读到就用，读不到不能炸。
+
+    打包运行时会从 `_RESOURCE_DIR`（PyInstaller 解包目录）读 VERSION，
+    源码运行时 `_RESOURCE_DIR` 与 `BASE_DIR` 同为仓库根 —— 因此"读不到"的
+    模拟必须把两个查找路径都指向空目录，否则会读到仓库里真实的 VERSION。
+    """
     import config
 
     monkeypatch.setattr(config, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(config, "_RESOURCE_DIR", tmp_path)
     # 文件不存在（裁剪/打包环境）→ 退回占位版本，而不是让 import 失败
     assert config._read_version() == "0.0.0"
 
     (tmp_path / "VERSION").write_text("9.9.9\n", encoding="utf-8")
     assert config._read_version() == "9.9.9", "应去掉首尾空白"
+
+
+def test_read_version_prefers_resource_dir(monkeypatch, tmp_path):
+    """打包场景：VERSION 随包放在解包目录，应优先于 exe 同级目录被读到。"""
+    import config
+
+    res = tmp_path / "meipass"
+    res.mkdir()
+    beside = tmp_path / "exe_dir"
+    beside.mkdir()
+    (res / "VERSION").write_text("2.2.2", encoding="utf-8")
+    (beside / "VERSION").write_text("1.1.1", encoding="utf-8")
+
+    monkeypatch.setattr(config, "_RESOURCE_DIR", res)
+    monkeypatch.setattr(config, "BASE_DIR", beside)
+    assert config._read_version() == "2.2.2"
+
+    # 解包目录没有时，退回 exe 同级目录
+    (res / "VERSION").unlink()
+    assert config._read_version() == "1.1.1"
 
 
 def test_runtime_requirements_exclude_test_tooling():

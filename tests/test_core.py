@@ -35,6 +35,70 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # ---------- 检索（BM25） ----------
 
+def test_min_score_default_is_positive():
+    """MIN_SCORE 默认值必须为正（外部评审第 3 条：0.0 等于不过滤）。"""
+    import config
+
+    assert config.MIN_SCORE > 0, "MIN_SCORE 默认为 0 时，`score > 0` 等于没有任何过滤"
+    assert config.RETRIEVAL_LOW_CONFIDENCE > 0
+
+
+def test_search_documents_warns_on_low_confidence(monkeypatch):
+    """最高分低于低置信阈值时，检索结果应显式提示模型不要硬答。"""
+    import config
+    import tools as tools_mod
+
+    weak = [{"score": config.RETRIEVAL_LOW_CONFIDENCE / 2, "source": "a.md", "chunk": "内容"}]
+    monkeypatch.setattr(tools_mod, "_search_docs", lambda q, top_k=3: weak)
+    out = tools_mod.search_documents.invoke({"query": "随便问问"})
+    assert "相关度较低" in out
+    assert "不要据此编造" in out
+
+    # 高分时不加提示
+    strong = [{"score": config.RETRIEVAL_LOW_CONFIDENCE * 2, "source": "a.md", "chunk": "内容"}]
+    monkeypatch.setattr(tools_mod, "_search_docs", lambda q, top_k=3: strong)
+    out2 = tools_mod.search_documents.invoke({"query": "随便问问"})
+    assert "相关度较低" not in out2
+
+
+def test_search_documents_labels_source_channel(monkeypatch):
+    """检索结果应标注片段来自知识库还是上传文档。"""
+    import tools as tools_mod
+
+    hits = [
+        {"score": 0.033, "source": "uploads/我的笔记.md", "chunk": "上传内容", "channel": "uploads"},
+        {"score": 0.030, "source": "docs/a.md", "chunk": "知识库内容", "channel": "documents"},
+    ]
+    monkeypatch.setattr(tools_mod, "_search_docs", lambda q, top_k=3: hits)
+    out = tools_mod.search_documents.invoke({"query": "内容"})
+    assert "（上传文档）" in out
+    assert "（知识库）" in out
+
+
+def test_channel_merge_is_normalized(sample_docs, monkeypatch):
+    """上传通道与全局通道合并时应先做通道内归一化。
+
+    旧实现直接比较原始 RRF 分：全局分是两个子通道之和（最高 ≈0.033），
+    上传分只有单通道（最高 ≈0.017），上传文档被系统性压制。
+    """
+    import retriever as retriever_mod
+    from retriever import build_index, search
+
+    build_index(force=True)
+    # 构造上传通道的强命中（其通道内最高分）
+    monkeypatch.setattr(
+        retriever_mod, "_search_uploaded",
+        lambda q_tokens, top_k, min_score: [
+            {"score": 0.0167, "source": "uploads/笔记.md", "chunk": "上传的强命中内容"}
+        ],
+    )
+    hits = search("这个项目的技术栈是什么", top_k=3)
+    sources = [h["source"] for h in hits]
+    assert "uploads/笔记.md" in sources, f"上传通道的通道内最优结果应参与竞争: {sources}"
+    # 返回项需带 channel 字段，便于上层标注来源
+    assert all("channel" in h for h in hits)
+
+
 def test_search_relevant_query_returns_hits(sample_docs):
     """文档相关问题应命中检索，分数 > 0。"""
     from retriever import build_index, search
@@ -305,6 +369,98 @@ def test_extract_tool_calls_from_ai_messages():
     assert "分层设计" in calls[0]["result"]
 
 
+# ---------- 工具结果对齐（外部评审：位置 zip 会整体错位） ----------
+
+def test_extract_tool_calls_matches_by_tool_call_id():
+    """有 tool_call_id 时应按 id 配对，而不是按出现顺序。"""
+    from graph import _extract_tool_calls
+
+    class FakeAIMessage:
+        type = "ai"
+
+        def __init__(self, tool_calls):
+            self.tool_calls = tool_calls
+
+    class FakeToolMessage:
+        type = "tool"
+
+        def __init__(self, content, tool_call_id):
+            self.content = content
+            self.tool_call_id = tool_call_id
+
+    messages = [
+        FakeAIMessage([{"name": "search_documents", "args": {}, "id": "call_a"}]),
+        FakeAIMessage([{"name": "web_search", "args": {}, "id": "call_b"}]),
+        # 结果故意乱序返回（并发工具节点的真实情况）
+        FakeToolMessage("网页搜索结果内容", "call_b"),
+        FakeToolMessage("文档检索结果内容", "call_a"),
+    ]
+    calls = _extract_tool_calls(messages)
+    by_name = {c["name"]: c for c in calls}
+    assert "文档检索结果内容" in by_name["search_documents"]["result"]
+    assert "网页搜索结果内容" in by_name["web_search"]["result"]
+    assert all(c["matched_by"] == "tool_call_id" for c in calls)
+
+
+def test_extract_tool_calls_survives_missing_result():
+    """某次调用缺少 ToolMessage 时，其余调用的结果不得整体错位。"""
+    from graph import _extract_tool_calls
+
+    class FakeAIMessage:
+        type = "ai"
+
+        def __init__(self, tool_calls):
+            self.tool_calls = tool_calls
+
+    class FakeToolMessage:
+        type = "tool"
+
+        def __init__(self, content, tool_call_id):
+            self.content = content
+            self.tool_call_id = tool_call_id
+
+    messages = [
+        FakeAIMessage([
+            {"name": "search_documents", "args": {}, "id": "c1"},
+            {"name": "run_command", "args": {}, "id": "c2"},   # 该调用没有结果（异常中断）
+            {"name": "get_weather", "args": {}, "id": "c3"},
+        ]),
+        FakeToolMessage("文档内容 A", "c1"),
+        FakeToolMessage("天气：晴", "c3"),
+    ]
+    calls = _extract_tool_calls(messages)
+    by_name = {c["name"]: c for c in calls}
+    # 位置 zip 在这里会把 "天气：晴" 错配给 run_command
+    assert "文档内容 A" in by_name["search_documents"]["result"]
+    assert by_name["run_command"]["result"] == ""      # 缺失就应留空
+    assert "天气：晴" in by_name["get_weather"]["result"]
+
+
+def test_extract_tool_calls_marks_position_fallback():
+    """无 tool_call_id 时应退化为位置配对，并显式标记为降级路径。"""
+    from graph import _extract_tool_calls
+
+    class FakeAIMessage:
+        type = "ai"
+
+        def __init__(self, tool_calls):
+            self.tool_calls = tool_calls
+
+    class FakeToolMessage:
+        type = "tool"
+
+        def __init__(self, content):
+            self.content = content
+
+    messages = [
+        FakeAIMessage([{"name": "search_documents", "args": {}}]),
+        FakeToolMessage("旧格式结果"),
+    ]
+    calls = _extract_tool_calls(messages)
+    assert calls[0]["result"] == "旧格式结果"
+    assert calls[0]["matched_by"] == "position"  # 降级必须可见，不能静默
+
+
 def test_grounded_true_when_answer_reuses_tool_result():
     """回答复用了工具结果内容时 grounded 应为 True。"""
     from graph import _grounded
@@ -328,6 +484,68 @@ def test_grounded_false_when_no_tool_calls():
     from graph import _grounded
 
     assert _grounded("你好", []) is False
+
+
+# ---------- grounded 判据收紧（外部评审：旧判据近乎恒真） ----------
+
+def test_grounded_rejects_short_fragment_overlap():
+    """只在短碎片上重合不应判为 grounded（旧判据 10 字符滑窗命中即真）。"""
+    from graph import _grounded
+
+    # 工具结果很长，回答只与其有 8 个连续字符的重合
+    calls = [{
+        "name": "search_documents",
+        "result": "本项目的部署方式包括容器化与本地直跑两种，生产环境建议使用容器并配合健康检查",
+    }]
+    answer = "关于部署方式，我建议你查阅文档。"
+    assert _grounded(answer, calls) is False
+
+
+def test_grounded_ignores_tool_template_lines():
+    """回答复述工具模板文本（如来源标注行）不应判为 grounded。"""
+    from graph import _grounded
+
+    calls = [{
+        "name": "search_documents",
+        "result": (
+            "以下为检索到的文档片段（回答时请用 [1][2]... 标注来源）：\n\n"
+            "[1] 来源: docs/a.md | 相关度: 0.032\n"
+            "数据库连接池的默认上限是二十"
+        ),
+    }]
+    # 回答只复刻了模板行内容，没有复用正文
+    answer = "以下为检索到的文档片段（回答时请用 [1][2]... 标注来源）：没有找到答案。"
+    assert _grounded(answer, calls) is False
+
+
+def test_grounded_detail_returns_quantified_evidence():
+    """grounded_detail 应给出可核验的量化结果（重叠长度/片段/阈值/方法标注）。"""
+    from graph import grounded_detail
+
+    calls = [{
+        "name": "search_documents",
+        "result": "以下为检索到的文档片段：\n[1] 来源: a.md | 相关度: 0.5\n核心架构是分层设计，包含路由与检索节点",
+    }]
+    answer = "根据文档，核心架构是分层设计，包含路由与检索节点。"
+    d = grounded_detail(answer, calls)
+    assert d["grounded"] is True
+    assert d["overlap_chars"] >= d["threshold"]
+    assert d["overlap_snippet"]
+    assert d["method"] == "longest_common_substring"
+    assert d["is_heuristic"] is True  # 明示这是启发式，不当成正确性证明
+
+
+def test_grounded_does_not_fire_on_generic_phrasing():
+    """长工具结果 + 泛泛回答不应命中（旧判据在这类场景下几乎恒真）。"""
+    from graph import _grounded
+
+    long_result = (
+        "分层设计包含路由节点、检索节点与生成节点。路由节点负责判断问题类型；"
+        "检索节点负责混合检索；生成节点负责组织回答。此外还有反思与来源提取逻辑。"
+    )
+    calls = [{"name": "search_documents", "result": long_result}]
+    answer = "这个项目的架构分为若干层，具体细节请参考文档。"  # 未复用任何连续长片段
+    assert _grounded(answer, calls) is False
 
 
 def test_reflection_uses_real_tool_names():

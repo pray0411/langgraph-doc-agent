@@ -412,9 +412,21 @@ def test_build_sources_dedupes_and_caps():
 # ---------- 6. 配置健壮性 ----------
 
 def test_bad_numeric_env_does_not_crash_import(monkeypatch):
-    """`.env` 里数值写错不应让进程在 import 期崩掉。"""
+    """`.env` 里数值写错不应让进程在 import 期崩掉。
+
+    断言与"未设置时的默认值"比较，而不是写死具体数字 —— 否则每次调整默认
+    阈值（例如 MIN_SCORE 因外部评审从 0.0 提到 0.01）都要改测试，容易把
+    "回退生效"这件事和"默认值是多少"混在一起。
+    """
     import importlib
     import sys
+
+    # 先取干净环境下的默认值
+    for name in ("MIN_SCORE", "TOP_K"):
+        monkeypatch.delenv(name, raising=False)
+    sys.modules.pop("config", None)
+    baseline = importlib.import_module("config")
+    expect_top_k, expect_min_score = baseline.TOP_K, baseline.MIN_SCORE
 
     monkeypatch.setenv("TOP_K", "3o")     # 典型笔误
     monkeypatch.setenv("MIN_SCORE", "abc")
@@ -422,8 +434,8 @@ def test_bad_numeric_env_does_not_crash_import(monkeypatch):
         sys.modules.pop(name, None)
     try:
         cfg = importlib.import_module("config")
-        assert cfg.TOP_K == 3, "非法值应回退默认，而不是抛 ValueError"
-        assert cfg.MIN_SCORE == 0.0
+        assert cfg.TOP_K == expect_top_k, "非法值应回退默认，而不是抛 ValueError"
+        assert cfg.MIN_SCORE == expect_min_score
     finally:
         sys.modules.pop("config", None)
         import config  # noqa: F401 - 还原模块，避免影响后续用例
@@ -507,6 +519,12 @@ def test_chunk_overlap_invariant_is_enforced():
     轻则切片不前进/死循环，重则同一段文本被反复拼进片段。
     这是环境变量，最常见的误写正是 `CHUNK_OVERLAP=500`（与 size 相等），
     所以约束必须落在代码里而不是文档里。
+
+    注意：子进程里显式把仓库根加进 `sys.path`。`python -c` 默认会把**当前
+    工作目录**加入模块搜索路径，但在启用安全路径模式的环境（`python -P` /
+    `PYTHONSAFEPATH=1`，CI 与部分加固环境会开）下不会 —— 那时 `import config`
+    会 ImportError，测试失败信息却指向"配置不变式未生效"，把环境差异误报成
+    产品缺陷。
     """
     import subprocess
     import sys
@@ -514,6 +532,8 @@ def test_chunk_overlap_invariant_is_enforced():
 
     root = Path(__file__).resolve().parent.parent
     code = (
+        "import sys;"
+        f"sys.path.insert(0, {str(root)!r});"
         "import os;"
         "os.environ['CHUNK_SIZE']='200';"
         "os.environ['CHUNK_OVERLAP']='500';"

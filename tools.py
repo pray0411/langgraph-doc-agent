@@ -13,6 +13,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from config import BOCHA_API_KEY, TOP_K
+from config import RETRIEVAL_LOW_CONFIDENCE as LOW_CONFIDENCE_SCORE
 from logging_setup import audit, get_logger
 from retriever import search as _search_docs
 
@@ -360,19 +361,39 @@ def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
 def search_documents(query: str) -> str:
     """在本地文档知识库中检索与 query 相关的内容。
 
-    当用户问题涉及项目文档、技术架构、部署配置、README 内容时调用。
-    返回检索到的文档片段（含来源），按相关度从高到低排列。
+    当用户问题涉及项目文档、技术文档、部署配置、README 内容时调用。
+    返回检索到的文档片段（含来源与相关度），按相关度从高到低排列。
+    若检索结果相关度较低，会在结果前给出明确提示——此时如果内容不足以回答，
+    应如实说明"文档中未找到相关内容"，不要凭空作答。
     """
     try:
         hits = _search_docs(query, top_k=TOP_K)
     except Exception as exc:  # noqa: BLE001
         return f"文档检索失败: {exc}"
     if not hits:
-        return "没有在文档知识库中找到相关内容。"
-    # 带编号的来源列表，指示模型回答时引用来源编号
-    parts = ["以下为检索到的文档片段（回答时请用 [1][2]... 标注来源）："]
+        return (
+            "没有在文档知识库中找到相关内容。"
+            "请如实告知用户未检索到相关资料，不要凭记忆编造。"
+        )
+
+    parts: list[str] = []
+    # 低置信提示：阈值默认 0.02（双通道 rank0 ≈ 0.033，单通道 rank0 ≈ 0.017）。
+    # 外部评审第 3 条指出：原实现 MIN_SCORE=0.0 等于不过滤，弱命中会被静默塞给
+    # 模型，模型于是"有依据地"胡答。现在至少在结果里把这件事说出来。
+    top_score = float(hits[0].get("score") or 0.0)
+    if top_score < LOW_CONFIDENCE_SCORE:
+        parts.append(
+            f"⚠️ 检索结果相关度较低（最高融合分 {top_score:.3f}，低置信阈值 "
+            f"{LOW_CONFIDENCE_SCORE:.2f}）。若以下内容不足以回答问题，"
+            "请如实说明文档中未找到相关内容，不要据此编造。"
+        )
+
+    parts.append("以下为检索到的文档片段（回答时请用 [1][2]... 标注来源）：")
     for i, h in enumerate(hits, 1):
-        parts.append(f"[{i}] 来源: {h['source']} | 相关度: {h['score']:.3f}\n{h['chunk']}")
+        origin = "上传文档" if h.get("channel") == "uploads" else "知识库"
+        parts.append(
+            f"[{i}] 来源: {h['source']}（{origin}） | 相关度: {h['score']:.3f}\n{h['chunk']}"
+        )
     return "\n\n".join(parts)
 
 

@@ -40,7 +40,11 @@ dependencies = { file = ["requirements.txt"] }
 testpaths = ["tests"]
 # --strict-markers：拼错的标记直接报错，而不是被静默忽略
 # （标记写错 = 用例没被筛选 = 你以为跑了其实没跑，这类问题必须让它红）
-addopts = "-q --strict-markers"
+#
+# -m "not smoke"：默认排除真模型冒烟用例。它们是**唯一会真实外呼并产生费用**
+# 的一组，不该混进"跑一遍全量测试"这种日常动作里；需要时显式覆盖：
+#     python -m pytest tests/smoke -m smoke -q -s      # 命令行的 -m 覆盖 addopts
+addopts = "-q --strict-markers -m \"not smoke\""
 markers = [
     "unit: 纯函数级用例，无 IO、无端口、毫秒级",
     "integration: 需要起真端口 / 走 HTTP / 落盘，秒级",
@@ -48,6 +52,7 @@ markers = [
     "e2e: 端到端（含前端），最重，CI 里单独阶段跑",
     "slow: 明显偏慢的用例，本地开发可 -m 'not slow' 跳过",
     "allow_network: 显式允许真实外呼（默认全部用例被禁网）。只应极少数端到端冒烟用例使用，且不进 CI。",
+    "smoke: 真模型冒烟（testpaths 之外的 tests/smoke/，需要真实 API Key；定时或手动触发，不进主 CI）",
 ]
 filterwarnings = [
     # ResourceWarning 保持可见（default），但**不作为错误**：

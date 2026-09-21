@@ -526,16 +526,32 @@ def search(query: str, top_k: int = 3, min_score: float = MIN_SCORE) -> list[dic
             fused.append({"score": round(score, 6), "source": r["source"], "chunk": r["chunk"]})
 
     fused.sort(key=lambda x: x["score"], reverse=True)
+    for r in fused:
+        r["channel"] = "documents"
     global_result = fused[:top_k]
 
-    # 合并上传文档通道（用户上传的文档优先参与排序，量纲一致）
+    # 合并上传文档通道
     uploaded_result = _search_uploaded(q_tokens, top_k, min_score)
+    for r in uploaded_result:
+        r["channel"] = "uploads"
+
     if uploaded_result:
-        merged = {r["source"]: r for r in global_result}
-        for r in uploaded_result:
-            if r["source"] not in merged or r["score"] > merged[r["source"]]["score"]:
+        # 通道内归一化后再合并。为什么必须归一化（外部评审第 3 条）：
+        # 全局通道的 `score` 是 **BM25 与语义两个子通道之和**（最高 ≈ 0.033），
+        # 上传通道只有 BM25 单通道（最高 ≈ 0.017）。直接用原始分排序，上传文档
+        # 会被系统性压低，"同量纲公平竞争"就只是口号。这里把每个通道的最高分
+        # 归一为 1.0 再比较；返回时仍保留原始 RRF 分供展示与排查。
+        def _with_norm(rows: list[dict]) -> list[dict]:
+            top = max((r["score"] for r in rows), default=0.0) or 1.0
+            return [{**r, "_norm": r["score"] / top} for r in rows]
+
+        merged: dict[str, dict] = {}
+        for r in _with_norm(global_result) + _with_norm(uploaded_result):
+            prev = merged.get(r["source"])
+            if prev is None or r["_norm"] > prev["_norm"]:
                 merged[r["source"]] = r
-        result = sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:top_k]
+        ranked = sorted(merged.values(), key=lambda x: x["_norm"], reverse=True)[:top_k]
+        result = [{k: v for k, v in r.items() if k != "_norm"} for r in ranked]
     else:
         result = global_result
 

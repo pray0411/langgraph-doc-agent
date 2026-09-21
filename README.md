@@ -1,6 +1,8 @@
 # Pray
 
-基于 [LangGraph](https://github.com/langchain-ai/langgraph) 的本地 ReAct Agent。做法是把一组工具交给模型，由模型自主决定何时调用什么，覆盖文档问答（RAG）、联网搜索、代码落盘与运行验证、会话记忆与跨会话长期记忆。
+**一个本地 Agent 的工程实践：安全边界、测试基建与交付形态。** 功能上是基于 [LangChain `create_agent`](https://github.com/langchain-ai/langgraph) 的 ReAct Agent——把一组工具交给模型自主调用，覆盖文档问答（RAG）、联网搜索、代码落盘与运行验证、会话与跨会话记忆。
+
+需要说清楚的是：**Agent 内核本身没有技术增量**（就是标准 tool-calling 循环），项目的着力点在别处——命令执行的默认拒绝授权模型、两阶段 nonce 确认、可验证的测试密封机制、以及 Web / CLI / MCP / 桌面四种交付形态。评估这个项目时，请按"工程质量与安全边界"来看，而不是按"Agent 创新"来看。
 
 [![CI](https://github.com/pray0411/langgraph-doc-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/pray0411/langgraph-doc-agent/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -9,16 +11,31 @@
 
 本项目在**已建索引的文档范围**内问答、按需联网获取实时信息、以及"写代码 → 落盘 → 运行 → 读报错 → 修改"的本地闭环这几条路径上经过实测。它不是"什么都能问"的通用助手：索引外的问题会答不上来，长链路多步规划与需要真沙箱隔离的执行型任务均超出当前设计范围。
 
-仓库名 `langgraph-doc-agent` 来自最初定位（专用文档问答），后演进为通用 Agent，应用名为 **Pray**；保留旧名以免外部链接失效。
+仓库名 `langgraph-doc-agent` 来自最初定位（专用文档问答），后演进为带安全边界的通用 Agent，应用名为 **Pray**；保留旧名以免外部链接失效。
 
-## 特性
+## 能力与验证状态
 
-- **Agent 内核**：LangChain `create_agent`（ReAct / tool-calling），13 个工具由模型自主编排
-- **三层记忆**：checkpointer 会话记忆、SQLite `profile` 全局记忆、系统提示约束
-- **本地混合检索**：jieba + BM25 与语义向量的 RRF 融合，无需外部向量数据库；语义模型缺失时自动降级为纯 BM25，并可查询当前实际模式
-- **四种交付形态**：Web（SSE 流式）、CLI、MCP Server、桌面应用（pywebview）
-- **默认拒绝的命令安全模型**：非只读命令一律需用户确认，确认走服务端签发 nonce 的两阶段流程
-- **工程质量**：CI 覆盖 Windows / Linux × Python 3.10/3.12/3.13 六组合，287 条用例、检索质量门禁、覆盖率门禁、依赖漏洞扫描
+每条能力都标注了**它被验证到什么程度**——没有验证手段的宣称不写进来：
+
+| 能力 | 验证状态 |
+|---|---|
+| Agent 内核（`create_agent` + 13 工具） | 本地假 OpenAI 服务驱动的集成测试（确定性），**无真模型回归**（见"验证边界"） |
+| 命令授权（默认拒绝 + nonce 两阶段） | `tests/test_security_model.py` 把每条承诺写成断言，含"写→跑必须被拦"的攻击链复刻 |
+| 会话记忆（checkpointer，按 thread_id） | 单测 + 真实 HTTP 契约测试 |
+| 跨会话记忆（SQLite `profile` 表 + 提示注入） | 单测；注入面做过规范化，但只能防结构逃逸，防不住语义注入（详见 docs/安全模型.md） |
+| 检索（jieba+BM25 与语义向量 RRF 融合） | recall@3 / MRR 门禁**固定跑纯 BM25**（跨机器可比）；语义通道的收益尚未单独量化 |
+| 文档上传问答 | 增量索引与通道合并有单测；合并已改为通道内归一化（不同通道分数量纲不同源） |
+| 四种交付形态（Web / CLI / MCP / 桌面） | Web 与 CLI 有契约测试；MCP 有一条 stdio 端到端冒烟；桌面端仅 `--check` 自检 |
+| 反思（reflection，含工具调用统计与 grounded 检查） | 工具调用取自模型结构化输出（可靠）；**grounded 是启发式**：剥离工具模板文本后取与回答的最长公共子串（阈值 16 字符），衡量文本复用程度，**不等于事实正确性** |
+| 工程质量（CI 六组合、覆盖率门禁、lint、漏洞扫描） | GitHub Actions 全绿可见；301 条用例、覆盖率 81%、门禁 70%；另有真模型冒烟 workflow（定时/手动，未配置密钥则跳过） |
+
+## 特性（工程与安全侧）
+
+- **默认拒绝的命令安全模型**：非只读命令一律需用户确认；确认走服务端签发 nonce 的两阶段流程（杜绝"前端调接口自助登记批准"）
+- **来源校验**：`Origin` / `Host` 与服务端自算的本地身份集合比对，而非 `Origin == Host`（后者两侧都能伪造）
+- **可验证的测试密封**：屏蔽 `.env`、清空系统代理、包装 `socket.connect` 只放行回环——测试结论不依赖开发者本机环境
+- **主动披露**：覆盖率按模块列出缺口、安全模型列出残留面、CI 首跑失败原因逐条记录
+- **交付形态**：Web（SSE 流式）、CLI、MCP Server、桌面应用（pywebview 走系统 WebView）；Python 侧还有 PyInstaller 打包与 Dockerfile
 
 ## 架构
 
@@ -95,15 +112,18 @@ python -X utf8 main.py ask "这个项目的技术栈是什么？"
 
 ## 检索
 
-`retriever.py` 实现本地混合检索，面向中小规模文档集：
+`retriever.py` 实现本地检索，面向中小规模文档集：
 
 - 词法通道：jieba 分词 + BM25（k1=1.5, b=0.75），过滤中文停用词
-- 语义通道：sentence-transformers 本地模型，理解同义改写；可用 `DISABLE_SEMANTIC=1` 显式关闭
-- 融合：两通道排名后按 RRF（k=60）融合；语义模型缺失时静默降级为纯 BM25
-- 当前实际模式可通过 `retriever.retrieval_mode()` 查询（返回 `hybrid` 或 `bm25`），**报告检索指标时必须同时标注模式**
-- 缓存按 (查询, 索引版本, 上传版本) 失效；索引为带版本号的 JSON，旧格式首次启动自动重建
+- 语义通道（可选依赖）：sentence-transformers 本地模型，理解同义改写；`DISABLE_SEMANTIC=1` 可显式关闭
+- 融合：两通道排名后按 RRF（k=60）融合；语义模型缺失时降级为纯 BM25
+- 阈值：`MIN_SCORE` 默认 0.01（RRF 分恒为正，默认 0.0 等于**没有过滤**）；最高分低于 `RETRIEVAL_LOW_CONFIDENCE`（默认 0.02）时，工具返回会明确标注"相关度较低"并提示模型在无法作答时如实说明
+- 模式可查：`retriever.retrieval_mode()` 返回 `hybrid` 或 `bm25`；**报告检索指标时必须同时标注模式**
+- 缓存按 (查询, 索引版本, 上传版本) 失效；索引为带版本号的 JSON
 
-用户上传的文档（`.md` / `.txt` / `.py` / `.rst` / `.html`，单文件 ≤ 5 MB）进入内存 BM25 增量索引，与全局索引同量纲融合。
+关于"混合"二字要说清楚**依赖前提**：语义通道需要 `sentence-transformers`（连带 torch）。**打包版 `Pray.spec` 默认排除它，即官方发布版的检索是纯 BM25**；源码安装 `requirements.txt` 才有语义通道。模式不是恒定的，`retrieval_mode()` 是唯一可信来源。
+
+用户上传的文档（`.md` / `.txt` / `.py` / `.rst` / `.html`，单文件 ≤ 5 MB）进入内存 BM25 增量索引。上传通道与全局通道的**分数不同源**（全局是双子通道之和、上传是单通道），合并前先做**通道内归一化**，否则上传文档会被系统性压制——这是评审指出后修正的。
 
 ## 前端
 
@@ -276,7 +296,19 @@ pip-audit -r requirements.txt --desc                                  # 依赖�
 | 性能基线 | `tests/test_perf.py` | 检索 P95、SSE 首字、并发检索 |
 | CLI / 日志 | `tests/test_cli.py`、`tests/test_logging_audit.py` | 命令行入口；结构化日志与凭据脱敏 |
 
-测试套件通过三层隔离做到不依赖开发者本机环境：屏蔽 `.env` 加载、清空系统代理、包装 `socket.connect` 只放行回环地址（真实外呼须显式标记）。当前 287 条用例、总覆盖率 81%，门禁 70%；**各模块的覆盖率缺口在 [docs/工程质量.md](docs/工程质量.md) 中逐项披露**（含未覆盖的具体分支），另有 `[tool.mutmut]` 对 `approvals.py` / `retriever.py` 做变异测试，用于检验"测试能否抓住 bug"。
+测试套件通过三层隔离做到不依赖开发者本机环境：屏蔽 `.env` 加载、清空系统代理、包装 `socket.connect` 只放行回环地址（真实外呼须显式标记）。当前 **301 条用例**、总覆盖率 81%，门禁 70%；**各模块的覆盖率缺口在 [docs/工程质量.md](docs/工程质量.md) 中逐项披露**（含未覆盖的具体分支），另有 `[tool.mutmut]` 对 `approvals.py` / `retriever.py` 做变异测试，用于检验"测试能否抓住 bug"。
+
+**依赖可安装性**已加为 CI 门禁（`deps-installable` job）：四个 requirements 文件都必须能被 pip 解析——这条来自一次真实事故，`requirements-mcp.txt` 曾因版本冲突根本装不上，而本机因为早已装好相关包而毫无察觉。
+
+## 验证边界
+
+明确这里**没有验证到什么**，避免把"管道连通"读成"效果达标"：
+
+- **真模型回归覆盖极薄**：集成测试用本地假 OpenAI 兼容服务（确定性、零成本），真模型只有 `tests/smoke/` 三条主链路，且需显式开启（`PRAY_SMOKE=1` + 密钥），不进主 CI
+- **检索评估集很小**：8 篇手写语料 + 25 条查询，门禁固定跑纯 BM25；指标证明的是"检索管道与门禁可用"，不是"在你的文档集上答得准"
+- **覆盖率数字带环境前提**：81% 是在**未安装 sentence-transformers** 的环境测得（语义相关代码走降级分支），换机器数字会变
+- **没有真实用户与外部贡献**：单人开发，无外部 issue/PR 反馈，文档与代码的措辞以"可自查"为准
+- **`static/index.html` 是单文件自写渲染器**：只有 E2E 覆盖金路径 + XSS 注入，代码块执行 / 设置面板 / 上传 UI 未被 E2E 覆盖
 
 CI 覆盖 Windows / Linux × Python 3.10/3.12/3.13 六组合，不提供任何 API Key 与 `.env`。首次上 CI 时八个 job 中有七个失败，暴露的问题（可选依赖未装导致 `mcp_server` 导入失败、`requirements-mcp.txt` 依赖冲突、lint 从未运行、E2E 抓到前端 XSS）记录在 [docs/工程质量.md](docs/工程质量.md)。
 

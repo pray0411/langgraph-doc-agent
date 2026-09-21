@@ -201,9 +201,21 @@ if CHUNK_OVERLAP < 0 or CHUNK_OVERLAP >= CHUNK_SIZE:
     CHUNK_OVERLAP = _fixed_overlap
 
 TOP_K = _env_int("TOP_K", 3)
-# 检索最低分数阈值（混合检索融合分）。注意：RRF 融合分恒为正，
-# 因此默认 0.0 等于**关闭阈值**（不会过滤任何结果）——想要过滤必须显式设正值。
-MIN_SCORE = _env_float("MIN_SCORE", 0.0)
+
+# 检索最低融合分阈值（RRF）。
+#
+# 为什么默认不再是 0.0（外部评审第 3 条）：RRF 分恒为正，`if score > 0.0` 等于
+# **没有任何过滤**——只要查询词与片段有任何共现就入库，短查询下几乎必然命中，
+# 于是"我把不相关的片段塞给了模型"这件事在代码层面完全不可见。
+# 取值依据：单通道 rank r 的贡献是 1/(60+r)（rank 0 ≈ 0.0167，rank 30 ≈ 0.0111，
+# rank 60 ≈ 0.0083）。默认 0.01 保留"单通道排名前 40 左右"及"双通道命中"的结果，
+# 滤掉长尾弱命中；需要更严或更松时通过环境变量调整。
+MIN_SCORE = _env_float("MIN_SCORE", 0.01)
+
+# 低置信阈值：最高融合分低于此值时，检索结果会被标注为"相关度较低"，
+# 并提示模型在无法据此作答时如实说明，而不是硬凑一个答案。
+# 0.02 大致对应"只有单通道、且排名不靠前"的命中（双通道 rank0 ≈ 0.033）。
+RETRIEVAL_LOW_CONFIDENCE = _env_float("RETRIEVAL_LOW_CONFIDENCE", 0.02)
 
 # 语义检索模型（sentence-transformers，本地运行无需 API Key）
 # 未配置/加载失败时自动回退纯 BM25 检索
