@@ -24,12 +24,11 @@ import time
 import urllib.request
 from http.server import ThreadingHTTPServer
 
-from server import Handler
-
 # 版本号**单一来源**：仓库根目录 VERSION 文件 → config.APP_VERSION。
 # 不要在桌面端硬编码 —— 此前 desktop.py("1.1.0")、pyproject.toml("0.9.0")
 # 与 Release tag 三处各写一个，随时会不一致。
 from config import APP_VERSION  # noqa: E402
+from server import Handler
 
 # 默认窗口尺寸
 WINDOW_SIZE = (1180, 800)
@@ -112,7 +111,9 @@ def open_desktop_window(port: int = 0, update_check: bool = True) -> None:
 
     srv, url = start_server(port)
     print(f"Pray 桌面版已启动: {url}（关闭窗口即退出）")
-    window = webview.create_window(
+    # 这里不接返回值：pywebview 的窗口对象只在 webview.start() 期间有效，
+    # 赋值给局部变量不会被使用（ruff F841）。需要窗口句柄时应显式保留并说明用途。
+    webview.create_window(
         "Pray · 通用 AI Agent",
         url,
         width=WINDOW_SIZE[0],

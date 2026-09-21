@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """测试套件：检索（BM25）、工具、配置、反思、服务端超时。
 
 运行: python -m pytest tests/ -v
@@ -13,12 +12,23 @@
 """
 import base64
 import json
-import os
 import sys
 import threading
 from pathlib import Path
 
 import pytest
+
+
+def _approve(command: str) -> bool:
+    """测试辅助：与前端**完全相同的两步**（服务端签发 challenge → confirm 换批准）。
+
+    不再直接"登记一条批准"——那正是外部评审指出的自助授权原语：旧 /api/approve
+    接受裸命令就登记为"用户已批准"，前端甚至自动调了一次，于是闸门形同不存在。
+    测试改走真实路径，这条链才被测住。
+    """
+    import approvals
+
+    return approvals.confirm(approvals.mint(command, "test"), command)[0]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -81,7 +91,6 @@ def test_index_version_upgrade_auto_rebuild(sample_docs, tmp_path):
 
 def test_uploaded_file_indexed_and_searched(sample_docs, tmp_path):
     """上传文档应进入检索（source 带 uploads/ 前缀），删除后不再命中。"""
-    import retriever as retriever_mod
     from retriever import add_uploaded_file, remove_uploaded_file, search
 
     add_uploaded_file("笔记.md", "Pray 上传文档测试：西瓜是夏天的水果。")
@@ -141,8 +150,9 @@ def test_search_semantic_channel_participates_in_fusion(sample_docs, monkeypatch
     assert len(hits) > 0
 
     # 索引里确实存了向量（语义通道真实生效）
-    from config import INDEX_FILE
     import json as _json
+
+    from config import INDEX_FILE
     data = _json.loads(INDEX_FILE.read_text(encoding="utf-8"))
     assert "vec" in data["records"][0]
 
@@ -519,8 +529,9 @@ def test_agent_rebuilt_when_memory_version_changes(monkeypatch, tmp_path):
 def test_memory_persists_across_asks(monkeypatch, tmp_path):
     """相同 thread_id 的连续调用应累积历史（服务端真记忆）。"""
     monkeypatch.setenv("MEMORY_DB", str(tmp_path / "mem.sqlite"))
-    from langgraph.checkpoint.sqlite import SqliteSaver
     import sqlite3
+
+    from langgraph.checkpoint.sqlite import SqliteSaver
 
     conn = sqlite3.connect(tmp_path / "mem.sqlite", check_same_thread=False)
     saver = SqliteSaver(conn)
@@ -564,15 +575,17 @@ def test_checkpointer_concurrent_no_database_locked(monkeypatch, tmp_path):
     agent 并发压测验证两条路径交错时连接不出错。
     """
     monkeypatch.setenv("MEMORY_DB", str(tmp_path / "mem_conc.sqlite"))
-    from langgraph.checkpoint.sqlite import SqliteSaver
     import sqlite3
+
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
     import graph as graph_mod
 
     conn = sqlite3.connect(tmp_path / "mem_conc.sqlite", check_same_thread=False)
     saver = SqliteSaver(conn)
 
     from langchain_core.language_models import BaseChatModel
-    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.messages import AIMessage
     from langchain_core.outputs import ChatGeneration, ChatResult
 
     class FakeModel(BaseChatModel):
@@ -623,14 +636,15 @@ def test_session_provider_recorded_in_checkpoint_metadata(monkeypatch, tmp_path)
     import graph as graph_mod
     graph_mod._memory = None  # 重置单例，让 get_memory 使用新路径
 
-    from langgraph.checkpoint.sqlite import SqliteSaver
     import sqlite3
+
+    from langgraph.checkpoint.sqlite import SqliteSaver
 
     conn = sqlite3.connect(tmp_path / "mem_prov.sqlite", check_same_thread=False)
     saver = SqliteSaver(conn)
 
     from langchain_core.language_models import BaseChatModel
-    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.messages import AIMessage
     from langchain_core.outputs import ChatGeneration, ChatResult
 
     class FakeModel(BaseChatModel):
@@ -831,6 +845,7 @@ def http_server(monkeypatch, tmp_path):
     返回 (base_url, call_log)，call_log 记录 ask() 收到的参数。
     """
     from http.server import ThreadingHTTPServer as _THS
+
     import server as server_mod
 
     call_log = {"args": None}
@@ -945,7 +960,7 @@ def test_http_csrf_rejects_cross_origin_post(http_server):
         headers={"Origin": "http://evil.com", "Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=10):
             assert False, "跨站 POST 不应成功"
     except urllib.error.HTTPError as e:
         assert e.code == 403
@@ -967,7 +982,7 @@ def test_http_csrf_rejects_dns_rebinding(http_server):
                  "Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=10):
             assert False, "rebinding 请求不应成功"
     except urllib.error.HTTPError as e:
         assert e.code == 403
@@ -982,7 +997,7 @@ def test_http_csrf_rejects_ip_prefix_domain(http_server):
         headers={"Origin": "http://127.0.0.1.evil.com", "Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=10):
             assert False, "前缀域名 Origin 不应成功"
     except urllib.error.HTTPError as e:
         assert e.code == 403
@@ -1225,8 +1240,8 @@ def test_list_sessions_returns_latest_per_thread(monkeypatch, tmp_path):
     import sqlite3
 
     monkeypatch.setenv("MEMORY_DB", str(tmp_path / "mem.sqlite"))
-    from langgraph.checkpoint.sqlite import SqliteSaver
     from langgraph.checkpoint.base import Checkpoint
+    from langgraph.checkpoint.sqlite import SqliteSaver
 
     conn = sqlite3.connect(tmp_path / "mem.sqlite", check_same_thread=False)
     saver = SqliteSaver(conn)
@@ -1268,8 +1283,8 @@ def test_delete_session_removes_thread(monkeypatch, tmp_path):
     import sqlite3
 
     monkeypatch.setenv("MEMORY_DB", str(tmp_path / "mem2.sqlite"))
-    from langgraph.checkpoint.sqlite import SqliteSaver
     from langgraph.checkpoint.base import Checkpoint
+    from langgraph.checkpoint.sqlite import SqliteSaver
 
     conn = sqlite3.connect(tmp_path / "mem2.sqlite", check_same_thread=False)
     saver = SqliteSaver(conn)
@@ -1296,8 +1311,9 @@ def test_ask_stream_yields_start_then_done(monkeypatch, tmp_path):
     用真实的 AIMessageChunk/ToolMessageChunk 模拟流（isinstance 判断），
     覆盖 create_agent（节点名 "model"）的真实流式行为。
     """
-    import graph as graph_mod
     from langchain_core.messages import AIMessageChunk, ToolMessage
+
+    import graph as graph_mod
 
     class FakeAgent:
         def __init__(self):
@@ -1353,8 +1369,8 @@ def test_get_session_messages_returns_history(monkeypatch, tmp_path):
     import sqlite3
 
     monkeypatch.setenv("MEMORY_DB", str(tmp_path / "mem3.sqlite"))
-    from langgraph.checkpoint.sqlite import SqliteSaver
     from langgraph.checkpoint.base import Checkpoint
+    from langgraph.checkpoint.sqlite import SqliteSaver
 
     conn = sqlite3.connect(tmp_path / "mem3.sqlite", check_same_thread=False)
     saver = SqliteSaver(conn)
@@ -1414,8 +1430,9 @@ def test_get_session_messages_unknown_thread(monkeypatch, tmp_path):
 
 def test_is_ollama_available_parses_url(monkeypatch):
     """is_ollama_available 应正确解析带路径/https 的 base_url（urlsplit 而非字符串切分）。"""
-    import config as config_mod
     import socket
+
+    import config as config_mod
     from server import is_ollama_available
 
     calls = {}
@@ -1482,8 +1499,8 @@ def test_get_session_messages_generates_sources(monkeypatch, tmp_path):
     import sqlite3
 
     monkeypatch.setenv("MEMORY_DB", str(tmp_path / "mem5.sqlite"))
-    from langgraph.checkpoint.sqlite import SqliteSaver
     from langgraph.checkpoint.base import Checkpoint
+    from langgraph.checkpoint.sqlite import SqliteSaver
 
     conn = sqlite3.connect(tmp_path / "mem5.sqlite", check_same_thread=False)
     saver = SqliteSaver(conn)
@@ -1557,9 +1574,8 @@ def _approved_run(run_command, **payload):
     （approvals），没有登记记录时 confirmed=True 同样被拒。走这条辅助函数，
     测试经过的是与真实请求**完全相同**的授权路径，而不是绕过它。
     """
-    import approvals
 
-    approvals.approve(payload["command"])
+    _approve(payload["command"])
     return run_command.invoke({**payload, "confirmed": True})
 
 
@@ -1664,8 +1680,8 @@ def test_run_command_high_risk_runs_when_confirmed(monkeypatch, tmp_path):
     r0 = run_command.invoke({"command": cmd, "confirmed": True})
     assert "NEED_CONFIRM" in r0
 
-    # 用户在前端确认 → /api/approve 登记批准
-    approvals.approve(cmd)
+    # 用户在前端确认 → 服务端签发 nonce，前端 /api/confirm 换成一次性批准
+    _approve(cmd)
     r1 = run_command.invoke({"command": cmd, "confirmed": True})
     assert "NEED_CONFIRM" not in r1, f"批准后不应再要求确认：{r1}"
     assert "执行成功" in r1 or "执行失败" in r1, f"批准后应进入执行分支：{r1}"
@@ -1730,14 +1746,13 @@ def test_run_command_utf8_output_no_mojibake(monkeypatch, tmp_path):
 def _runterm_start_approved(command: str) -> dict:
     """默认拒绝模型下启动终端：先登记批准。
 
-    等价于前端点 ▶ 时的真实流程——先 `POST /api/approve` 再 `POST /api/run/start`。
+    等价于前端点 ▶ 时的真实流程——先 `POST /api/run/prepare` 拿服务端签发的 nonce、经 `/api/confirm` 换一次性批准，再 `POST /api/run/start`。
     测试走同一条路，而不是绕过授权。
     """
-    import approvals
 
     from runterm import start
 
-    approvals.approve(command)
+    _approve(command)
     return start(command)
 
 
@@ -1745,7 +1760,7 @@ def test_runterm_interactive_flow(monkeypatch, tmp_path):
     """runterm 应支持启动→输入→输出→退出 的完整交互。"""
     import config as config_mod
     monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
-    from runterm import send_input, poll, stop
+    from runterm import poll, send_input, stop
 
     (tmp_path / "inter.py").write_text(
         "print('ready')\n"
@@ -1763,12 +1778,12 @@ def test_runterm_interactive_flow(monkeypatch, tmp_path):
     import time
     time.sleep(1)
     out = poll(sid)
-    assert any("ready" in l for l in out["lines"]), f"应有初始输出: {out}"
+    assert any("ready" in line for line in out["lines"]), f"应有初始输出: {out}"
 
     send_input(sid, "hello")
     time.sleep(1)
     out2 = poll(sid)
-    assert any("got: hello" in l for l in out2["lines"]), f"应回显输入: {out2}"
+    assert any("got: hello" in line for line in out2["lines"]), f"应回显输入: {out2}"
 
     send_input(sid, "x")
     time.sleep(1)
@@ -1800,7 +1815,7 @@ def test_runterm_high_risk_requires_approval(monkeypatch, tmp_path):
     r1 = start(cmd)
     assert "NEED_CONFIRM" in r1.get("error", ""), "未批准的高危命令应被拒绝"
 
-    approvals.approve(cmd)
+    _approve(cmd)
     r2 = start(cmd)
     assert "session_id" in r2, "批准后应能启动"
     stop(r2["session_id"])
@@ -2016,7 +2031,7 @@ def test_fetch_url_non_github_allowed_after_approval(monkeypatch):
 
     def _fake_get(u, allowed_hosts=None, timeout=15):
         calls.append(u)
-        return u, "<html><body>示例页面内容</body></html>".encode("utf-8")
+        return u, "<html><body>示例页面内容</body></html>".encode()
 
     monkeypatch.setattr(tools_mod, "_http_get", _fake_get)
     from tools import fetch_url
@@ -2026,7 +2041,7 @@ def test_fetch_url_non_github_allowed_after_approval(monkeypatch):
     assert "NEED_CONFIRM" in r1
     assert calls == [], "未批准不应发请求"
     # 批准后 → 放行
-    approvals.approve(url)
+    _approve(url)
     r2 = fetch_url.invoke({"url": url})
     assert "示例页面内容" in r2
     assert calls == [url]
@@ -2040,7 +2055,7 @@ def test_fetch_url_github_no_confirm_needed(monkeypatch):
     import tools as tools_mod
 
     def _fake_get(url, allowed_hosts=None, timeout=15):
-        return url, "<html><body>github 页面</body></html>".encode("utf-8")
+        return url, "<html><body>github 页面</body></html>".encode()
 
     monkeypatch.setattr(tools_mod, "_http_get", _fake_get)
     from tools import fetch_url
@@ -2059,8 +2074,8 @@ def test_fetch_url_github_repo_reads_readme(monkeypatch):
     def _fake_get(url, allowed_hosts=None, timeout=15):
         calls.append(url)
         if "raw.githubusercontent.com" in url:
-            return url, "# Pray\n\n一个 LangGraph 通用 Agent 项目。".encode("utf-8")
-        return url, "<html><body>仓库主页</body></html>".encode("utf-8")
+            return url, "# Pray\n\n一个 LangGraph 通用 Agent 项目。".encode()
+        return url, "<html><body>仓库主页</body></html>".encode()
 
     monkeypatch.setattr(tools_mod, "_http_get", _fake_get)
     from tools import fetch_url
@@ -2080,7 +2095,7 @@ def test_fetch_url_readme_missing_falls_back_to_page(monkeypatch):
     def _fake_get(url, allowed_hosts=None, timeout=15):
         if "raw.githubusercontent.com" in url:
             raise HTTP404("404 Not Found")
-        return url, "<html><head><script>var x=1;</script><style>.a{}</style></head><body><h1>仓库名</h1><p>这是仓库说明。</p></body></html>".encode("utf-8")
+        return url, "<html><head><script>var x=1;</script><style>.a{}</style></head><body><h1>仓库名</h1><p>这是仓库说明。</p></body></html>".encode()
 
     monkeypatch.setattr(tools_mod, "_http_get", _fake_get)
     from tools import fetch_url
@@ -2167,7 +2182,7 @@ def test_run_command_approval_flow(monkeypatch, tmp_path):
     r1 = run_command.invoke({"command": cmd, "confirmed": True})
     assert "NEED_CONFIRM" in r1
     # 2. 用户批准登记
-    approvals.approve(cmd)
+    _approve(cmd)
     # 3. 批准后可执行（move 文件不存在会失败，但进入执行分支而非拒绝）
     r2 = run_command.invoke({"command": cmd, "confirmed": True})
     assert "执行成功" in r2 or "执行失败" in r2, "批准后应进入执行分支"

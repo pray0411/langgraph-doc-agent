@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """日志与安全审计测试（logging_setup.py）。
 
 为什么这个文件比它看起来重要：`logging_setup` 是"命令执行审计"的唯一出口。
@@ -197,7 +196,7 @@ def test_get_logger_uses_pray_namespace():
 
 def test_reset_state_removes_handlers():
     """reset_state 必须摘掉 handler：否则轮转文件句柄会跨用例泄漏。"""
-    from logging_setup import audit, get_logger, reset_state
+    from logging_setup import audit, reset_state
 
     audit("before_reset")          # 触发配置
     assert logging.getLogger("pray").handlers, "配置后应有 handler"

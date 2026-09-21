@@ -270,7 +270,7 @@ def build_index(docs_dir: Path = DOCS_DIR, force: bool = False) -> dict:
     # 语义向量（可选）：encoder 可用则编码并写入记录，否则记录无 vec 字段
     vectors = encode_texts(chunks_all)
     if vectors is not None:
-        for rec, vec in zip(records, vectors):
+        for rec, vec in zip(records, vectors, strict=False):
             rec["vec"] = vec
 
     meta = _compute_bm25_meta(all_tokenized)
@@ -438,7 +438,7 @@ def _cosine(vec_a: list[float], vec_b: list[float]) -> float:
     """两个向量的余弦相似度。"""
     if not vec_a or not vec_b or len(vec_a) != len(vec_b):
         return 0.0
-    dot = sum(x * y for x, y in zip(vec_a, vec_b))
+    dot = sum(x * y for x, y in zip(vec_a, vec_b, strict=False))
     norm_a = math.sqrt(sum(x * x for x in vec_a))
     norm_b = math.sqrt(sum(y * y for y in vec_b))
     if norm_a == 0 or norm_b == 0:

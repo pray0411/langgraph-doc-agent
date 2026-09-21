@@ -7,9 +7,8 @@
 """
 import hashlib
 import time
-from pathlib import Path
-
 import urllib.request
+from pathlib import Path
 
 from langchain_core.tools import tool
 
@@ -124,7 +123,6 @@ def list_files(path: str = "") -> str:
     Args:
         path: WRITE_DIR 内的相对目录（空字符串 = 根目录，如 "scripts"）
     """
-    import os
     import time as _time
 
     checked = _safe_target(path, must_exist=False)
@@ -485,6 +483,39 @@ _SAFE_FORBIDDEN_CHARS = set("|&;><`$%^")
 # 只看首词会被判成"只读"，所以必须按选项名再拦一道。
 _SAFE_FORBIDDEN_SUBSTRINGS = ("-exec", "-execdir", "-ok", "-okdir", "-delete")
 
+
+def _safe_arg_escape(command: str) -> str | None:
+    """只读命令的**参数**是否越出可读边界；越界返回原因，否则 None。
+
+    外部评审指出：白名单只看首词。`type C:\\Users\\me\\.ssh\\id_rsa`、
+    `cat /etc/passwd`、`type ..\\..\\secret.txt` 都不含 shell 元字符，
+    于是被判成"只读"直接执行 —— 没有副作用，但读到了 WRITE_DIR 之外。
+    只读白名单的语义应当是"**只能在 WRITE_DIR 内**只读"，所以这里补一道
+    参数边界：盘符/UNC 绝对路径、上跳、家目录展开一律退回"需确认"。
+
+    为什么按平台分开判断开头的 `/`：Windows 上 `/b`、`/s` 是 `dir` 的开关，
+    而 POSIX 上 `/etc` 是路径、开关用 `-`。不区分就会两头错一头
+    （要么放行 `/tmp`，要么把 `dir /b` 误判成越界 → 制造确认疲劳）。
+    """
+    import os
+
+    posix = os.name != "nt"
+    for raw in command.split():
+        tok = raw.strip("\"'")
+        if not tok:
+            continue
+        if tok in ("..", "~") or tok.startswith(("../", "..\\", "~/", "~\\")):
+            return f"上跳或家目录展开（{tok}）"
+        if "/../" in tok or "\\..\\" in tok:
+            return f"路径上跳（{tok}）"
+        if len(tok) >= 3 and tok[0].isalpha() and tok[1] == ":" and tok[2] in "\\/":
+            return f"盘符绝对路径（{tok}）"
+        if tok.startswith("\\\\") or tok.startswith("//"):
+            return f"UNC 路径（{tok}）"
+        if posix and tok.startswith("/"):
+            return f"绝对路径（{tok}）"
+    return None
+
 _COMMAND_TIMEOUT = 30  # 秒
 _MAX_OUTPUT = 2000  # 字符
 
@@ -524,6 +555,10 @@ def classify_command(command: str) -> tuple[str, str]:
     if not (set(stripped) & _SAFE_FORBIDDEN_CHARS) and not any(
         frag in lowered for frag in _SAFE_FORBIDDEN_SUBSTRINGS
     ):
+        escape = _safe_arg_escape(stripped)
+        if escape is not None:
+            # 只读但越界：不按"只读"放行，落回需确认（见 _safe_arg_escape 的说明）
+            return "high", f"只读命令的参数越出可读边界：{escape}"
         for pat in _SAFE_COMMAND_PATTERNS:
             if re.search(pat, stripped, re.IGNORECASE):
                 return "safe", f"只读命令（{pat}）"
@@ -560,7 +595,6 @@ def run_command(command: str, input_text: str = "", confirmed: bool = False) -> 
             每行一个输入，换行分隔）
         confirmed: 高危命令的用户确认标记（首次调用传 False）
     """
-    import re
     import subprocess
 
     from config import WRITE_DIR
@@ -583,26 +617,26 @@ def run_command(command: str, input_text: str = "", confirmed: bool = False) -> 
     # 2. 高危命令（含一切会执行代码的写法）需要确认
     is_high_risk = level == "high"
     if is_high_risk:
-        if not confirmed:
-            audit("run_command", command_hash=cmd_hash, command_preview=command[:120],
-                  high_risk=True, outcome="need_confirm", approved=False, detail=reason,
-                  duration_ms=int((time.time() - started) * 1000))
-            return (
-                f"NEED_CONFIRM 需要用户确认：{reason}，命令 "
-                f"[{command}] 是否执行？请等待用户确认。"
-            )
-        # confirmed=True 必须命中后端批准登记（用户在前端确认后经 /api/approve 登记）
-        # ——防止模型自填参数绕过授权。批准一次性消费，仅对当前命令有效。
-        from approvals import is_approved
+        from approvals import is_approved, mint
 
-        if not is_approved(command):
-            audit("run_command", command_hash=cmd_hash, command_preview=command[:120],
-                  high_risk=True, outcome="need_confirm", approved=False,
-                  reason="model_self_confirmed_without_approval", detail=reason,
-                  duration_ms=int((time.time() - started) * 1000))
+        # 未确认（模型第一次调用），或模型自填 confirmed=True 但用户还没确认：
+        # 都**签发一个 challenge**（approvals.mint）。
+        # 服务端签发 nonce 是关键：前端只能拿这个 nonce 去 /api/confirm 换批准，
+        # 不能自己"登记"一条批准 —— 旧的 /api/approve 接受裸命令直接登记，
+        # 等于把授权接口交给了任何能发请求的人（前端甚至自动调了一次）。
+        # 返回文案只用于让模型知道"现在在等人"，协议本身走结构化事件。
+        if not confirmed or not is_approved(command):
+            nonce = mint(command, reason)
+            audit(
+                "run_command", command_hash=cmd_hash, command_preview=command[:120],
+                high_risk=True, outcome="need_confirm", approved=False,
+                reason="unapproved" if not confirmed else "model_self_confirmed_without_approval",
+                detail=reason, nonce_prefix=nonce[:8],
+                duration_ms=int((time.time() - started) * 1000),
+            )
             return (
-                f"NEED_CONFIRM 未获用户批准：{reason}，命令 "
-                f"[{command}] 没有对应的批准记录。请等待用户在前端确认。"
+                f"NEED_CONFIRM 需要用户确认：{reason}，命令 [{command}] 是否执行？"
+                "请等待用户在前端确认后再重试（**不要自己把 confirmed 设为 True**）。"
             )
 
     # 3. 执行（沙箱目录 + 超时 + 截断 + 标准输入）
@@ -719,8 +753,9 @@ def open_in_browser(file_path: str) -> str:
 # ---------- fetch_url：只读抓取（GitHub 白名单自动放行，其他域名需用户确认） ----------
 
 # 自动放行白名单：GitHub 相关域名。其他域名（如 arxiv.org / docs.python.org）
-# 必须用户确认后才可抓取（NEED_CONFIRM → 前端弹窗 → /api/approve 登记 →
-# 同 URL 重试放行），机制与 run_command 高危命令一致。
+# 必须用户确认后才可抓取（服务端签发 nonce → 结构化 need_confirm 事件 →
+# 前端展示原始 URL → /api/confirm 换一次性批准 → 同 URL 重试放行），
+# 机制与 run_command 高危命令完全一致。
 _FETCH_ALLOWED_HOSTS = {
     "github.com",
     "api.github.com",
@@ -762,14 +797,17 @@ def _fetch_needs_confirm(url: str, host: str) -> str | None:
     """非白名单域名：未获用户批准则返回 NEED_CONFIRM 文本，否则 None。"""
     if _host_allowed(host, _FETCH_ALLOWED_HOSTS):
         return None
-    from approvals import is_approved
+    from approvals import is_approved, mint
 
     if is_approved(url):
         return None
-    # 文本格式与 run_command 的 NEED_CONFIRM 完全一致，前端确认弹窗零改动复用
+    # 与 run_command 同一套：**服务端签发 challenge**，由前端展示原始 URL 后经
+    # /api/confirm 用 nonce 换取一次性批准。不再靠"文案里带 [url]"让前端正则提取
+    # —— 结构化事件由 graph.ask_stream 统一推送（approvals.challenges_since 游标）。
+    mint(url, f"抓取非白名单域名 {host}")
     return (
-        f"NEED_CONFIRM 需要用户确认：高危命令 [{url}] 是否执行？"
-        "（抓取非 GitHub 域名需用户确认；确认后请用**完全相同的 URL** 重试）"
+        f"NEED_CONFIRM 需要用户确认：抓取非白名单域名 {host}，目标 [{url}] 是否允许？"
+        "请等待用户在前端确认后，用**完全相同的 URL** 重试。"
     )
 
 

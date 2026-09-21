@@ -9,6 +9,14 @@
 # 此前这里只声明了 fastmcp：它虽然会**间接**带上 mcp，但
 # "照文档装依赖 → 跑 mcp_demo.py 却 ImportError" 是真实发生过的坑。
 # 直接依赖必须显式声明，不能靠传递依赖碰运气。
-
+#
+# version 修正（1.22.0 → 2.2.0）：原 pin 让本文件**根本装不上** ——
+# fastmcp 4.0.3 依赖 fastmcp-slim==4.0.3，后者要求 mcp-types>=2.0.0，
+# 而 mcp==1.22.0 那条线把 mcp 钉在旧版，pip 直接 ResolutionImpossible。
+# 实测复现：
+#     pip install --dry-run -r requirements-mcp.txt   # → 冲突退出 1
+# 也就是说"照文档 pip install -r requirements-mcp.txt"从来就跑不通，
+# 而本机环境是手工装出来的，所以一直没暴露。
+# 2.2.0 是与 fastmcp 4.0.3 实际匹配的版本（fastmcp 自身带的也是它）。
 fastmcp==4.0.3
-mcp==1.22.0
+mcp==2.2.0

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """前端最小 E2E（待办 C2）：一条金路径 + 一组 XSS 注入用例。
 
 为什么值得做：`static/index.html` 有 1582 行，其中包含一个**自己手写的 Markdown

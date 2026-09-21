@@ -19,13 +19,13 @@ import threading
 import uuid
 from typing import TypedDict
 
-from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AIMessageChunk, ToolMessage, ToolMessageChunk
-from langchain_openai import ChatOpenAI
 # Agent 构建：langchain 统一包提供 create_agent（替代 langgraph.prebuilt 的
 # create_react_agent——后者自 LangGraph V1.0 起弃用、V2.0 将移除）。
 # 迁移要点：prompt= 改名为 system_prompt=；其余参数（model/tools/checkpointer）不变。
 from langchain.agents import create_agent
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.messages import AIMessageChunk, ToolMessage, ToolMessageChunk
+from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.errors import GraphRecursionError
 
@@ -54,6 +54,36 @@ logger = get_logger(__name__)
 # 一个"业务上够用、失控时能及时止损"的值，并由 ask/ask_stream 捕获
 # GraphRecursionError 转成可读提示（而不是把栈丢给用户）。
 RECURSION_LIMIT = int(os.getenv("RECURSION_LIMIT", "25"))
+
+# 工具结果的"哨兵前缀" → 结构化 state。
+#
+# 为什么在这里归一化，而不是让前端匹配文案（外部评审第 3 条）：
+# 这些前缀（"✅ 执行成功（exit 0）"、"⛔ 已拦截…"）是**给人看的文案**，
+# 前端此前用 `/^NEED_CONFIRM /`、`/^⛔ /` 去判断"这是不是 run_command 的正常
+# 返回"。文案与协议耦合的代价本轮已经付过一次：后端把 NEED_CONFIRM 的措辞
+# 改成"命中高危模式（…）"后，前端的确认弹窗就静默失效了（P0-3）。
+# 现在协议只在这里解析一次、可单测，前端只读 tool_done 的 status 字段。
+_RESULT_STATUS_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("NEED_CONFIRM", "need_confirm"),
+    ("⛔ 已拦截", "blocked"),
+    ("⏱ 命令超时", "timeout"),
+    ("✅ 执行成功（exit ", "ok"),
+    ("❌ 执行失败（exit ", "failed"),
+)
+
+
+def _result_status(text: str) -> str:
+    """把工具返回文案归一成结构化状态；无法识别时返回 "info"。
+
+    只认**精确前缀**（含 run_command 的退出码行格式），避免把别的工具
+    "碰巧以 ❌ 开头"的返回也算成 run_command 的受控输出 —— 那会让真正的
+    工具异常不再显示警示条。行为与旧前端正则等价，只是搬到了一处。
+    """
+    head = (text or "").lstrip()
+    for prefix, status in _RESULT_STATUS_PREFIXES:
+        if head.startswith(prefix):
+            return status
+    return "info"
 
 
 class AgentResult(TypedDict, total=False):
@@ -393,7 +423,15 @@ def ask_stream(
       {"type": "start"}                        — 开始
       {"type": "token", "content": str}        — 回答文本增量
       {"type": "tool_start", "name": str}      — 工具开始执行
-      {"type": "tool_done", "result": str}     — 工具返回（前 200 字符）
+      {"type": "tool_done", "name", "status", "result"}
+                                               — 工具返回：name=工具名，
+                                                 status=结构化结果类别（见
+                                                 `_result_status`，前端据此判断
+                                                 是否为受控哨兵输出），
+                                                 result=返回文本前 200 字符
+      {"type": "need_confirm", "nonce", "command", "reason"}
+                                               — 高危命令待用户确认（**结构化**：
+                                                 前端按 type 识别，不匹配文案）
       {"type": "done", "answer, reflection, sources"} — 完成（含最终完整信息）
       {"type": "error", "message": str}        — 出错
 
@@ -425,6 +463,17 @@ def ask_stream(
     text_parts: list[str] = []
     seen_tools: set[str] = set()
     all_messages: list = []  # 从 updates 收集的完整消息（用于 usage/tool_calls）
+    # 待确认命令的游标。工具层判定需要确认时会**签发 challenge**（approvals.mint，
+    # 序号 +1），这里只把"新出现的"作为结构化事件推给前端。
+    #
+    # 为什么不再让前端解析工具返回的文案：上一版前端用的是
+    # `/NEED_CONFIRM 需要用户确认：高危命令 \[([^\]]+)\]/` 这样的正则，
+    # 本轮文案一改（前缀变成"命中高危模式（…）"）它就再也匹配不上，
+    # 弹窗静默消失 —— 而那个弹窗是整条链上**唯一**的人为护栏。
+    # 把"要不要等用户确认"编码在给人看的字符串里，是这个 bug 的根因。
+    from approvals import challenges_since, latest_seq
+
+    confirm_cursor = latest_seq()
     try:
         for item in agent.stream(
             {"messages": messages_in}, config=config, stream_mode=["messages", "updates"]
@@ -456,7 +505,24 @@ def ask_stream(
                         # 连带破坏前端的高危命令确认弹窗）
                         content = getattr(msg_chunk, "content", None)
                         if isinstance(content, str) and content:
-                            yield {"type": "tool_done", "result": content[:200]}
+                            # status 由服务端归一（见 _result_status）：前端只读字段，
+                            # 不再自己匹配文案，避免"改文案就静默失效"重演。
+                            yield {
+                                "type": "tool_done",
+                                "name": getattr(msg_chunk, "name", "") or "",
+                                "status": _result_status(content),
+                                "result": content[:200],
+                            }
+                            # 结构化"待用户确认"事件：前端按 type 识别、按字段渲染，
+                            # 不再去匹配人类可读文案（见 confirm_cursor 的说明）。
+                            for challenge in challenges_since(confirm_cursor):
+                                confirm_cursor = max(confirm_cursor, challenge["seq"])
+                                yield {
+                                    "type": "need_confirm",
+                                    "nonce": challenge["nonce"],
+                                    "command": challenge["command"],
+                                    "reason": challenge["reason"],
+                                }
                 else:
                     # updates 流：{node: {"messages": [...]}}
                     for payload in (inner or {}).values():
@@ -590,7 +656,7 @@ def _extract_tool_calls(messages: list) -> list[dict]:
         if role == "tool":
             content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
             results.append(str(content))
-    for call, result in zip(calls, results):
+    for call, result in zip(calls, results, strict=False):
         call["result"] = result
 
     return calls
@@ -831,7 +897,7 @@ def get_session_messages(thread_id: str, limit: int = 100, provider: str = "") -
                 # 有文本：合并待并入的工具调用，生成 sources/reflection
                 all_tools = pending_tools + tools
                 # 工具结果回填（pending_results 对应 pending_tools 部分）
-                for call, res in zip(pending_tools, pending_results):
+                for call, res in zip(pending_tools, pending_results, strict=False):
                     call["result"] = res
                 sources = _build_sources(all_tools) if all_tools else []
                 # 历史回放无精确 usage（checkpoint 不含），按文本长度估算并标注

@@ -15,7 +15,9 @@
 - POST /api/uploads/reindex   : 把磁盘上"手动放入"的文件重新纳入索引
 - POST /api/run/start         : 破坏性命令 → 400 已拦截；高危命令未批准 →
                                 400 NEED_CONFIRM（且不产生进程）；空命令 → 400
-- POST /api/approve           : 登记后放行（HTTP 层确实到达 runterm.start）
+- POST /api/run/prepare       : 破坏性 → 403；安全 → 免确认；高危 → need_confirm+nonce
+- POST /api/confirm           : 无/伪造/不匹配的 nonce 一律 400；成功后一次性放行
+- POST /api/approve           : 已移除 → 404（原"收裸命令即登记"的自助授权接口）
 - runterm 集成                : 批准一次性消费（第二次同命令重新要求确认）
 - POST /api/run/input|stop    : 缺参数 → 400；会话不存在 → 200 + error 字段
 - GET  /api/run/output        : 缺 session_id → 400
@@ -34,6 +36,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+
+def _approve(command: str) -> bool:
+    """测试辅助：与前端**完全相同的两步**（服务端签发 challenge → confirm 换批准）。
+
+    不再直接"登记一条批准"——那正是外部评审指出的自助授权原语：旧 /api/approve
+    接受裸命令就登记为"用户已批准"，前端甚至自动调了一次，于是闸门形同不存在。
+    测试改走真实路径，这条链才被测住。
+    """
+    import approvals
+
+    return approvals.confirm(approvals.mint(command, "test"), command)[0]
 
 
 # ---------- 测试夹具：真实服务 + 临时 WRITE_DIR / UPLOADS_DIR ----------
@@ -363,30 +377,102 @@ def test_run_start_high_risk_needs_confirm_and_spawns_nothing(web):
     assert runterm.list_active() == 0, "未批准的请求不得起子进程"
 
 
-def test_approve_then_run_start_reaches_runterm(web, monkeypatch):
-    """先 /api/approve 登记，再 /api/run/start 应真的走到 runterm.start。
+def test_prepare_confirm_then_run_start_reaches_runterm(web, monkeypatch):
+    """真实三步：prepare 拿 nonce → confirm 换批准 → run/start 才放行。
 
-    这里把 runterm.start 换成桩，验证的是"HTTP 层 → runterm"这段接线正确；
-    runterm 自身的审批门禁另有单测（见文件末尾）。
+    第 1 步必须用**真实的** `runterm.start`：审批门禁就实现在它内部，
+    提前把它换成桩会把被测对象一起换掉（这一步曾写成"先打桩再断言 400"，
+    于是断言的是桩的返回值，测了个空 —— 门禁没被覆盖到）。
+    只有第 4 步（验证"HTTP 层 → runterm"这段接线）才打桩，避免真起子进程。
+    真实 `runterm.start` 在批准后确实放行，由
+    `test_security_model.py::test_runterm_enforces_queue_and_line_limits` 覆盖。
     """
     import runterm
 
+    cmd = "del __nope__.txt"
+    # 1) 直接 start：没有任何批准 → 拒绝，且不起进程（真实门禁）
+    s0, _ = _post(web.base, "/api/run/start", {"command": cmd})
+    assert s0 == 400
+    assert runterm.list_active() == 0, "未批准的请求不得起子进程"
+
+    # 2) prepare：高危 → 结构化 need_confirm + 服务端签发的 nonce
+    s1, b1 = _post(web.base, "/api/run/prepare", {"command": cmd})
+    d1 = json.loads(b1)
+    assert s1 == 200 and d1["need_confirm"] is True and d1["nonce"]
+    assert d1["command"] == cmd, "要展示给用户的命令必须由服务端返回"
+
+    # 3) confirm：用 nonce 换取一次性批准
+    s2, b2 = _post(web.base, "/api/confirm", {"nonce": d1["nonce"], "command": cmd})
+    assert s2 == 200 and json.loads(b2)["ok"] is True
+
+    # 4) start 这才真的放行（此处才打桩：只验证 HTTP 层到 runterm 的接线）
     seen = []
     monkeypatch.setattr(runterm, "start",
-                        lambda cmd: (seen.append(cmd) or {"session_id": "s-test"}))
-
-    cmd = "del __nope__.txt"
-    s1, b1 = _post(web.base, "/api/approve", {"command": cmd})
-    assert s1 == 200 and json.loads(b1)["ok"] is True
-
-    s2, b2 = _post(web.base, "/api/run/start", {"command": cmd})
-    assert s2 == 200, b2
-    assert json.loads(b2)["session_id"] == "s-test"
+                        lambda c: (seen.append(c) or {"session_id": "s-test"}))
+    s3, b3 = _post(web.base, "/api/run/start", {"command": cmd})
+    assert s3 == 200, b3
+    assert json.loads(b3)["session_id"] == "s-test"
     assert seen == [cmd]
 
 
-def test_approve_empty_command_returns_400(web):
-    status, _ = _post(web.base, "/api/approve", {"command": ""})
+def test_confirm_without_server_nonce_cannot_grant_approval(web):
+    """核心回归（外部评审 P0-1）：**不存在"自助授予批准"的路径**。
+
+    旧 /api/approve 接受任意命令并直接登记为"用户已批准"——前端甚至自动调了
+    一次，于是后端那道闸在真实使用路径上永远为真地通过。
+    现在批准必须先有服务端签发的 nonce，且 nonce 与命令哈希绑定：
+    伪装成旧调用形态、伪造 nonce、空 nonce 都必须失败。
+    """
+    import approvals
+    import runterm
+
+    cmd = "del __nope__.txt"
+    for payload in (
+        {"command": cmd},                              # 旧接口的调用形态（裸命令）
+        {"command": cmd, "nonce": "forged-nonce"},     # 伪造 nonce
+        {"command": cmd, "nonce": ""},                 # 空 nonce
+    ):
+        status, body = _post(web.base, "/api/confirm", payload)
+        assert status == 400, f"{payload} 不该被接受：{body}"
+        assert json.loads(body)["ok"] is False
+
+    # 确认全失败之后，直接 start 依然被拒、依然没有进程、也不该留下批准记录
+    s, b = _post(web.base, "/api/run/start", {"command": cmd})
+    assert s == 400 and "NEED_CONFIRM" in json.loads(b)["error"]
+    assert runterm.list_active() == 0
+    assert approvals.pending_count() == 0, "不得留下任何批准记录"
+
+
+def test_confirm_rejects_command_swap(web):
+    """nonce 与命令绑定：拿 A 命令的 nonce 去批准 B 命令必须失败。"""
+    cmd_a = "del __a__.txt"
+    _, b1 = _post(web.base, "/api/run/prepare", {"command": cmd_a})
+    nonce = json.loads(b1)["nonce"]
+    status, body = _post(web.base, "/api/confirm",
+                         {"nonce": nonce, "command": "del __b__.txt"})
+    assert status == 400
+    assert "不匹配" in json.loads(body)["error"]
+
+
+def test_prepare_rejects_destructive_command(web):
+    """prepare 对破坏性命令直接 403，且不签发任何挑战。"""
+    import approvals
+
+    status, body = _post(web.base, "/api/run/prepare", {"command": "rm -rf /"})
+    assert status == 403
+    assert "已拦截" in json.loads(body)["error"]
+    assert approvals.challenge_count() == 0
+
+
+def test_prepare_safe_command_needs_no_confirmation(web):
+    """只读命令 prepare 直接放行（level=safe），不弹窗。"""
+    status, body = _post(web.base, "/api/run/prepare", {"command": "dir"})
+    data = json.loads(body)
+    assert status == 200 and data["ok"] is True and data["level"] == "safe"
+
+
+def test_confirm_empty_command_returns_400(web):
+    status, _ = _post(web.base, "/api/confirm", {"nonce": "x", "command": ""})
     assert status == 400
 
 
@@ -541,7 +627,7 @@ def test_runterm_start_gate_approval_and_one_time_consume(monkeypatch, tmp_path)
         r1 = runterm.start(cmd)
         assert "error" in r1 and "NEED_CONFIRM" in r1["error"]
 
-        approvals.approve(cmd)
+        _approve(cmd)
         r2 = runterm.start(cmd)
         assert "session_id" in r2, f"批准后应放行，实际 {r2}"
 
@@ -563,7 +649,7 @@ def test_runterm_start_blocked_command_is_refused(monkeypatch, tmp_path):
     runterm.reset_state()
     try:
         cmd = "rm -rf /"
-        approvals.approve(cmd)  # 即便有批准记录
+        _approve(cmd)  # 即便有批准记录
         result = runterm.start(cmd)
         assert "error" in result
         assert "已拦截" in result["error"]

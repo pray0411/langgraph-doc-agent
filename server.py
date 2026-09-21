@@ -10,15 +10,21 @@ POST /api/mode     -> 切换运行模式（deepseek/openai/ollama，无需重启
 POST /api/config   -> 运行时更换 API Key / 模型配置
 POST /ask          -> {question, thread_id?} 返回 {answer, log, reflection, sources, thread_id}
 POST /ask/stream   -> SSE 流式问答（token 增量 + 工具状态 + 最终 sources）
+POST /api/run/prepare -> 交互终端启动前分级；高危命令返回 {need_confirm, nonce, command, reason}
 POST /api/run/start -> 启动交互式终端进程（{command} -> {session_id}）
 POST /api/run/input -> 向终端进程写入输入（{session_id, text}）
 GET  /api/run/output?session_id= -> 轮询终端新输出
 POST /api/run/stop  -> 终止终端进程
+POST /api/confirm   -> 用服务端签发的 nonce 换取一次性批准（{nonce, command}）
+                       —— 取代旧的 /api/approve：那个接口接受裸命令直接登记为
+                       "用户已批准"，等于把授权做成了自助接口（外部评审 P0-1）。
 
 加固措施：
 - 请求体大小限制（MAX_BODY，防止超大请求）
 - 单请求超时（timeout 线程 + 信号式检查）
 - 错误信息脱敏（不向客户端暴露内部异常细节）
+- 来源校验（Origin/Sec-Fetch-Site/Host 三重），见 Handler._origin_ok
+- 绑定非回环地址时强制 API Token（未配置则随机生成并打印），见 _enforce_token_for_public_bind
 """
 import base64
 import json
@@ -219,9 +225,11 @@ class Handler(BaseHTTPRequestHandler):
     def _origin_ok(self) -> tuple[bool, str]:
         """来源校验：这次状态变更请求是否可能来自本机界面。返回 (是否放行, 原因)。
 
-        恶意网页可用 form 表单（simple request，无 CORS 预检）向本机端口发请求——
-        不校验的话，浏览器会替你调用 `/api/approve` 把任意命令登记为"用户已批准"，
-        再调 `/api/run/start` 执行它。规则按顺序：
+        恶意网页可用 form 表单（simple request，无 CORS 预检）向本机端口发请求。
+        注意这里为什么**不能**指望 nonce 模型兜住：nonce 防的是"凭空授予批准"，
+        防不住"由外部页面发起的一整条完整流程" —— 攻击页面可以自己依次走完
+        `/api/run/prepare → /api/confirm → /api/run/start`，每一步都合规矩。
+        所以"是不是本机界面发起的"必须由这一层独立判定。规则按顺序：
 
         1. 携带了**已配置且正确**的 API Token → 放行。显式凭据不是"环境凭据"，
            CSRF 的威胁模型不适用（浏览器不会替你把这个头带上）。
@@ -314,6 +322,11 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/health":
             self._json({"status": "ok"})
         elif path == "/api/mode":
+            # 这是"读"接口，但它泄露"本机在跑哪个 provider、有哪些模式可用"
+            # （外部评审指出：/api/mode 此前**完全没有鉴权**，是唯一一个
+            # 漏掉的读接口）。与 /api/sessions / /api/memory 等保持一致。
+            if not self._auth_required():
+                return
             self._json({"mode": get_mode(), "available_modes": available_modes()})
         elif path == "/api/sessions":
             if not self._auth_required():
@@ -450,11 +463,20 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._handle_run_write()
             return
-        if self.path == "/api/approve":
+        if self.path == "/api/run/prepare":
+            # 交互终端启动前的分级 + 挑战签发（必须先展示命令再执行）
             if not self._auth_required():
                 return
-            self._handle_approve()
+            self._handle_run_prepare()
             return
+
+        if self.path == "/api/confirm":
+            # 用服务端签发的 nonce 换取一次性批准（取代旧的 /api/approve 自助登记）
+            if not self._auth_required():
+                return
+            self._handle_confirm()
+            return
+
         if self.path == "/api/upload":
             if not self._auth_required():
                 return
@@ -616,7 +638,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
         def sse(event: dict):
-            self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"))
+            self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode())
             self.wfile.flush()
 
         # 生成器改在子线程运行、经队列投递：主线程按 SSE_IDLE_TIMEOUT 等待事件，
@@ -859,7 +881,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_uploads_list(self):
         """列出已上传文档（含内存索引片段数与磁盘大小）。"""
-        import os
 
         from retriever import list_uploaded_files
 
@@ -1071,8 +1092,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_run_output(self):
         """轮询拉取子进程新输出。"""
+        from urllib.parse import parse_qs as _pq
+        from urllib.parse import urlparse
+
         import runterm
-        from urllib.parse import urlparse, parse_qs as _pq
 
         qs = _pq(urlparse(self.path).query)
         session_id = (qs.get("session_id") or [""])[0]
@@ -1095,6 +1118,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_run_write(self):
         """把代码写入 generated/ 临时文件（交互终端用），带路径安全校验。"""
         from pathlib import Path
+
         from config import WRITE_DIR
 
         data = self._read_form()
@@ -1125,21 +1149,63 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as exc:
             self._json({"error": f"写入失败: {exc}"}, 500)
 
-    def _handle_approve(self):
-        """登记用户对高危命令的批准（前端确认弹窗后调用）。"""
+    def _handle_confirm(self):
+        """用户确认高危命令：用**服务端签发**的 nonce 换取一次性批准。
+
+        为什么不是"收一条命令就直接登记"（旧 /api/approve 的做法，外部评审 P0-1）：
+        那样等于把"授予批准"做成了自助接口 —— 任何能发请求的一方（前端自己、
+        本机其它进程）都能凭空把任意命令登记为"用户已批准"。前端甚至**自动**
+        调了一次，于是后端那道闸在真实路径上永远为真地通过。
+        现在 nonce 只能由服务端签发（工具层 mint / run/prepare），
+        确认时还校验"被确认的命令与展示给用户的命令哈希一致"，无法张冠李戴。
+        """
         import approvals
+
+        data = self._read_form()
+        nonce = (data.get("nonce") or [""])[0].strip()
+        command = (data.get("command") or [""])[0]
+        ok, reason = approvals.confirm(nonce, command)
+        if not ok:
+            audit("approval_rejected", nonce_prefix=nonce[:8], reason=reason,
+                  command_preview=command[:120])
+            self._json({"ok": False, "error": f"确认失败：{reason}"}, 400)
+            return
+        self._json({"ok": True, "command": command, "reason": reason})
+
+    def _handle_run_prepare(self):
+        """交互终端启动前：分级 + 必要时签发确认挑战。
+
+        前端必须先调这里，并把返回的 command **原样展示**给用户；
+        高危命令只有拿到 need_confirm/nonce 才能继续走 /api/confirm。
+        于是"前端自己拼一条命令就直接跑"不再成立：没有服务端签发的 nonce，
+        confirm 必然失败。
+        """
+        import approvals
+        import runterm
 
         data = self._read_form()
         command = (data.get("command") or [""])[0].strip()
         if not command:
-            self._json({"error": "缺少 command"}, 400)
+            self._json({"error": "命令不能为空"}, 400)
             return
-        approvals.approve(command)
-        self._json({"ok": True, "command": command})
+        level, reason = runterm.classify(command)
+        if level == "blocked":
+            audit("runterm_prepare", outcome="blocked", command_preview=command[:120],
+                  detail=reason)
+            self._json({"error": f"⛔ 已拦截：命令{reason}"}, 403)
+            return
+        if level == "safe":
+            audit("runterm_prepare", outcome="safe", command_preview=command[:120])
+            self._json({"ok": True, "level": "safe", "command": command})
+            return
+        nonce = approvals.mint(command, reason)
+        self._json({"need_confirm": True, "level": "high", "nonce": nonce,
+                    "command": command, "reason": reason})
 
     def _handle_open_file(self):
         """前端点击文件名时用系统默认程序打开 WRITE_DIR 内文件。"""
-        from urllib.parse import urlparse, parse_qs as _pq
+        from urllib.parse import parse_qs as _pq
+        from urllib.parse import urlparse
 
         qs = _pq(urlparse(self.path).query)
         filename = (qs.get("file") or [""])[0].strip()
@@ -1185,8 +1251,43 @@ def reset_state() -> None:
     reset_origin_cache()
 
 
+# 视为"本机"的绑定地址：这些地址只在本机可达，不必强制 Token
+_LOOPBACK_BIND_HOSTS = {"127.0.0.1", "::1", "localhost", ""}
+
+
+def enforce_token_for_public_bind(host: str) -> str:
+    """绑定非回环地址时强制 API Token：未配置就**随机生成并打印**。
+
+    外部评审的点：默认空 token + 文档里的 `docker run -p 0.0.0.0:8000:8000`
+    暴露到局域网之后，局域网内任何设备都能先 POST /api/run/prepare、
+    再 POST /api/confirm、然后 POST /api/run/start。README 此前只写"**推荐**
+    开启 API_TOKEN"——而"推荐"在默认路径上永远不会被打开。安全默认值必须是
+    **已开启**：回环绑定（默认）保持零配置体验；一旦对外绑定就自动生成，
+    用户从启动日志里取用（前端 ⚙ 面板填入）。
+    """
+    import secrets
+
+    import config
+
+    if host in _LOOPBACK_BIND_HOSTS:
+        return config.API_TOKEN
+    if config.API_TOKEN:
+        return config.API_TOKEN
+    token = secrets.token_urlsafe(32)
+    config.API_TOKEN = token
+    audit("api_token_autogenerated", bind_host=host, reason="non_loopback_bind")
+    print("=" * 72)
+    print(f"[安全] 服务绑定在 {host}（非回环地址），且未配置 API_TOKEN。")
+    print(f"[安全] 已自动生成临时 Token：{token}")
+    print("[安全] 客户端需带请求头 X-API-Token；重启后会重新生成。")
+    print("[安全] 需要长期固定请显式配置 .env: API_TOKEN=<你的值>")
+    print("=" * 72)
+    return token
+
+
 def run(host: str = "127.0.0.1", port: int = 8000):
     """启动 web 服务（阻塞）。日志同时写控制台与 logs/app.log。"""
+    enforce_token_for_public_bind(host)
     log_dir = setup_logging()
     logger.info("网页服务已启动: http://%s:%s", host, port)
     logger.info("应用日志: %s/app.log ；安全审计日志: %s/audit.log", log_dir, log_dir)

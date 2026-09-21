@@ -13,6 +13,12 @@ pytest-html==4.2.0          # CI 里生成可读报告（artifact）
 ruff==0.14.2                # lint + format
 pip-audit==2.9.0            # 已知漏洞扫描（CI 里跑）
 
+# 读取检索评估集（tests/eval/qa.yaml）与 YAML 语法自检。
+# 现在它是 langchain-core 的**传递**依赖，装得上；但"测试套件的直接依赖"
+# 不该靠传递依赖碰运气 —— langchain-core 哪天换掉 pyyaml，评估集就会静默
+# skip（`_load_qa` 的兜底），而 skip 掉的**质量门禁**看起来和"通过了"一样绿。
+pyyaml==6.0.3
+
 # 可选：行为契约 / 属性测试与变异测试（较重，按需安装）
 # schemathesis==4.0.0       # 基于 OpenAPI 的属性测试
 # mutmut==3.3.0             # 变异测试：检验"测试能不能抓住 bug"

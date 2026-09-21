@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """检索质量评估：把"感觉还行"变成可回归的指标。
 
 ## 这个文件解决什么问题
@@ -44,7 +43,6 @@ import os
 from pathlib import Path
 
 import pytest
-
 from conftest import forget_app_modules
 
 EVAL_DIR = Path(__file__).resolve().parent / "eval"
@@ -75,7 +73,6 @@ def eval_index(tmp_path_factory):
     os.environ["DOCS_DIR"] = str(CORPUS_DIR)
     forget_app_modules()
 
-    import config
     import retriever
 
     # 语料必须真的存在，否则"指标很好"只是因为检索到了别的东西

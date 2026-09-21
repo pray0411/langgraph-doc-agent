@@ -1,5 +1,6 @@
 """全局配置：从环境变量读取，未配置时使用默认值。"""
 import os
+import threading as _threading
 from pathlib import Path
 
 try:
@@ -65,12 +66,16 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 # 联网搜索（双引擎：配了 Bocha 用博查中文搜索，否则退回 DuckDuckGo）
 BOCHA_API_KEY = os.getenv("BOCHA_API_KEY", "")
 
-def _warn_bad_env(name: str, raw: str, default) -> None:
-    """提示某个环境变量值非法并已回退（走 stderr，避免依赖日志模块）。"""
+def _warn_bad_env(name: str, raw: str, default, why: str = "不是合法数值") -> None:
+    """提示某个环境变量取值不可用并已回退（走 stderr，避免依赖日志模块）。
+
+    `why` 让"格式错误"与"关系约束不满足"（如 CHUNK_OVERLAP >= CHUNK_SIZE）
+    都能给出说得清的原因 —— 回退时不说清为什么，用户会以为配置生效了。
+    """
     import sys
 
     print(
-        f"[config] 环境变量 {name}={raw!r} 不是合法数值，已回退为默认值 {default!r}",
+        f"[config] 环境变量 {name}={raw!r} {why}，已回退为 {default!r}",
         file=sys.stderr,
     )
 
@@ -108,6 +113,24 @@ def _env_float(name: str, default: float) -> float:
 # 检索
 CHUNK_SIZE = _env_int("CHUNK_SIZE", 500)
 CHUNK_OVERLAP = _env_int("CHUNK_OVERLAP", 100)
+
+# 不变式：1 <= CHUNK_SIZE 且 0 <= CHUNK_OVERLAP < CHUNK_SIZE。
+# 为什么必须硬校验而不是只在文档里写一句（外部评审第 6 条）：切片步长是
+# `CHUNK_SIZE - CHUNK_OVERLAP`，一旦 overlap >= size，步长就 <= 0 ——
+# 轻则切片不前进/陷入死循环，重则同一段文本被反复拼进片段、索引体积爆炸。
+# 这两个值来自环境变量，最常见的误写正是 `CHUNK_OVERLAP=500`（与 size 相等），
+# 所以约束必须落在代码里、并且回退时说明原因。
+if CHUNK_SIZE < 1:
+    _warn_bad_env("CHUNK_SIZE", str(CHUNK_SIZE), 500, why="必须为正整数")
+    CHUNK_SIZE = 500
+if CHUNK_OVERLAP < 0 or CHUNK_OVERLAP >= CHUNK_SIZE:
+    _fixed_overlap = max(1, CHUNK_SIZE // 5)
+    _warn_bad_env(
+        "CHUNK_OVERLAP", str(CHUNK_OVERLAP), _fixed_overlap,
+        why=f"必须满足 0 <= overlap < CHUNK_SIZE({CHUNK_SIZE})",
+    )
+    CHUNK_OVERLAP = _fixed_overlap
+
 TOP_K = _env_int("TOP_K", 3)
 # 检索最低分数阈值（混合检索融合分）。注意：RRF 融合分恒为正，
 # 因此默认 0.0 等于**关闭阈值**（不会过滤任何结果）——想要过滤必须显式设正值。
@@ -165,8 +188,8 @@ PROVIDER_PRESETS = {
 # 运行时 API 配置（网页端可动态更换，不写入文件）
 # 结构: {provider: {"api_key": str, "base_url": str, "model": str}}
 # 加锁保护：网页端写（/api/config）与 Agent 读（构建模型时）并发，dict 读写非原子
-import threading as _threading
-
+# （`import threading as _threading` 已提到文件顶部：模块级导入放在代码中间
+#  会触发 ruff E402，也让"这个文件的依赖"变得不好一眼看清。）
 _runtime_provider_config: dict = {}
 _runtime_config_lock = _threading.Lock()
 # 配置版本号：每次运行时配置变更 +1，供外部缓存失效（如 agent 按 mode 缓存）

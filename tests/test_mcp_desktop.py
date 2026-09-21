@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """MCP Server 与桌面端（pywebview）封装测试。
 
 运行: python -m pytest tests/test_mcp_desktop.py -v
@@ -7,26 +6,51 @@
 - MCP 工具函数直接单测（不经过 stdio 传输，避免子进程与真实模型调用）
 - 网络调用（graph.ask / tools）全部 monkeypatch
 - 桌面端只测"起服务 + 首页 200"（无窗口环境不开 WebView）
+
+依赖说明：MCP 那组用例需要**可选**依赖 fastmcp/mcp（见 requirements-mcp.txt）。
+没装时它们会 **skip 并说明装法**，而不是整片 ERROR —— "环境缺可选依赖"不该
+被报成"产品坏了"。CI 会装这份可选依赖，因此在那里它们是**真的在跑**。
 """
-import json
 import sys
-import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import pytest
+
+# ---------- 可选依赖守卫（CI 曾因此整片红） ----------
+#
+# `mcp_server.py` 在模块顶层 `from fastmcp import FastMCP`，而 fastmcp 住在
+# **可选**依赖文件 requirements-mcp.txt 里 —— 只装 requirements.txt + dev 的
+# 环境（以前的 CI 就是这样）一 import 就 ModuleNotFoundError。
+#
+# 本机之所以看起来是绿的：开发用的 venv 顺手装了 mcp 那一套，于是"缺可选依赖"
+# 这个事实被本机环境掩盖了，而 CI 上一挂就是 5 个用例 × 6 个矩阵组合。
+#
+# 可选依赖就该可选：用例显式声明自己需要它，缺了就 skip 并写明装法，
+# 而不是把"环境没装"报成"产品坏了"。（CI 现在会装 requirements-mcp.txt，
+# 在那里这组用例是真的在跑，不是被跳过。）
+
+@pytest.fixture()
+def mcp_server():
+    """导入 mcp_server 的前置：fastmcp 缺失时明确 skip 而不是 ERROR。"""
+    pytest.importorskip(
+        "fastmcp",
+        reason="MCP 相关用例需要可选依赖：pip install -r requirements-mcp.txt",
+    )
+    import mcp_server as mod
+
+    return mod
 
 
 # ---------- MCP：工具注册与 ask ----------
 
-def test_mcp_tools_registered():
+def test_mcp_tools_registered(mcp_server):
     """MCP server 应注册预期工具集（整包 ask + 拆件只读工具）。"""
     import asyncio
-
-    import mcp_server
 
     async def _list():
         tools = await mcp_server.mcp.list_tools()
@@ -40,13 +64,12 @@ def test_mcp_tools_registered():
                         "open_in_browser", "fetch_url", "read_file", "list_files"}
 
 
-def test_mcp_ask_calls_graph_and_returns_answer(monkeypatch, tmp_path):
+def test_mcp_ask_calls_graph_and_returns_answer(mcp_server, monkeypatch, tmp_path):
     """MCP ask 应调用 graph.ask（非流式）并返回答案文本。"""
     monkeypatch.setenv("MEMORY_DB", str(tmp_path / "m.sqlite"))
     monkeypatch.setenv("GLOBAL_MEMORY_DB", str(tmp_path / "gm.sqlite"))
     import graph as graph_mod
     import memory as memory_mod
-    import mcp_server
 
     memory_mod.clear()
     graph_mod._agent_cache.clear()
@@ -78,11 +101,10 @@ def test_mcp_ask_calls_graph_and_returns_answer(monkeypatch, tmp_path):
         graph_mod._agent_cache.clear()
 
 
-def test_mcp_ask_handles_graph_error(monkeypatch, tmp_path):
+def test_mcp_ask_handles_graph_error(mcp_server, monkeypatch, tmp_path):
     """graph.ask 抛异常时 MCP ask 应返回友好错误而非崩溃。"""
     monkeypatch.setenv("MEMORY_DB", str(tmp_path / "m2.sqlite"))
     import graph as graph_mod
-    import mcp_server
 
     def _boom(*a, **k):
         raise RuntimeError("模型调用失败")
@@ -92,11 +114,10 @@ def test_mcp_ask_handles_graph_error(monkeypatch, tmp_path):
     assert "处理失败" in r and "模型调用失败" in r
 
 
-def test_mcp_memory_tools(monkeypatch, tmp_path):
+def test_mcp_memory_tools(mcp_server, monkeypatch, tmp_path):
     """MCP remember/list_memory/forget 应读写全局记忆。"""
     monkeypatch.setenv("GLOBAL_MEMORY_DB", str(tmp_path / "gm2.sqlite"))
     import memory as memory_mod
-    import mcp_server
 
     memory_mod.clear()
     try:
@@ -112,10 +133,9 @@ def test_mcp_memory_tools(monkeypatch, tmp_path):
         memory_mod.clear()
 
 
-def test_mcp_search_and_web_wrap_tools(monkeypatch, tmp_path):
+def test_mcp_search_and_web_wrap_tools(mcp_server, monkeypatch, tmp_path):
     """MCP search_documents / web_search 应调用 tools 包装。"""
     import tools as tools_mod
-    import mcp_server
 
     calls = {}
 
@@ -167,6 +187,7 @@ def test_desktop_parse_version():
 def test_desktop_check_for_update_newer(monkeypatch):
     """Release tag 高于本地版本时应返回更新信息。"""
     import json as _json
+
     import desktop
 
     class _Resp:
@@ -198,6 +219,7 @@ def test_desktop_check_for_update_newer(monkeypatch):
 def test_desktop_check_for_update_current_or_fail(monkeypatch):
     """已是最新 / 网络失败 / 无 release 均应静默返回 None。"""
     import json as _json
+
     import desktop
 
     # 1) 与本地同版本 → None

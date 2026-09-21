@@ -6,8 +6,11 @@
 - poll(session_id) -> 新输出增量
 - stop(session_id)
 
-安全：与 run_command 共用黑名单；交互式运行由用户主动点击触发（视为已确认），
-不做高危确认（用户就在终端前）。进程只在 WRITE_DIR 内启动。
+安全：与 run_command **共用同一个分类器**（`tools.classify_command`，默认拒绝），
+不再自己维护一份必然漂移的名单。前端 ▶ 触发**不等于已获批准**：高危命令要求
+用户在看到完整命令后确认 —— 服务端签发 nonce（/api/run/prepare），用户确认后
+经 /api/confirm 换取一次性批准，`start()` 仍会显式校验批准记录。
+进程只在 WRITE_DIR 内启动。
 
 关于配置读取方式（一次修复）：原实现在模块顶部 `from config import WRITE_DIR`
 —— 那是**导入时快照**。`config` 是运行时可变的（测试会 monkeypatch，用户可通过
@@ -52,6 +55,15 @@ def _classify(command: str) -> tuple[str, str]:
     return classify_command(command)
 
 
+def classify(command: str) -> tuple[str, str]:
+    """公开的分级入口（/api/run/prepare 使用）。
+
+    对外暴露而不是让 server 直接 import tools：保持"终端与 run_command 用同一套
+    判定"这件事只有一处实现，避免 server 又长出第三份规则。
+    """
+    return _classify(command)
+
+
 def start(command: str) -> dict:
     """启动一个交互式子进程，返回 {session_id} 或 {error}。"""
     from config import WRITE_DIR
@@ -61,9 +73,12 @@ def start(command: str) -> dict:
         audit("runterm_start", outcome="blocked", command_preview=command[:120], detail=reason)
         return {"error": f"⛔ 已拦截：命令{reason}"}
     if level == "high":
-        # 交互终端由前端 ▶ 触发，前端会先经 /api/approve 登记本条命令。
+        # 交互终端由前端 ▶ 触发，前端会先经 /api/run/prepare 拿到**服务端签发**
+        # 的 nonce，用户看到完整命令并确认后由 /api/confirm 换取一次性批准。
         # 这里仍显式校验批准记录，不因"用户点过按钮"就放行任意命令——
         # 用户点的是一段模型生成的代码，不等于审查过这条命令。
+        # （旧实现的前端在打开终端时会**自动**调自助登记接口把命令登记成已批准，
+        #  于是这道校验在真实使用路径上永远为真地通过 —— 外部评审 P0-1。）
         from approvals import is_approved
 
         if not is_approved(command):
@@ -107,19 +122,51 @@ def start(command: str) -> dict:
         return {"error": f"启动失败: {exc}"}
 
     session_id = uuid.uuid4().hex
-    out_q: queue.Queue = queue.Queue()
+    # 有界队列（外部评审指出：`_MAX_QUEUE` 此前只定义、未接线 ——
+    # 队列仍是 `queue.Queue()` 无界，前端一旦停止轮询或读得慢，
+    # 读线程就会把子进程产出全部堆进内存直到 OOM）。
+    # 满了丢**最旧**一行：保留最新输出（用户看到的是进度尾部），
+    # 丢弃行数累计到 dropped[0]，由 poll() 上报，前端可提示"输出过快已省略"。
+    out_q: queue.Queue = queue.Queue(maxsize=_MAX_QUEUE)
+    dropped = [0]
     done = threading.Event()
 
     def _reader():
-        """读 stdout 直到 EOF，放入队列。"""
+        """读 stdout 直到 EOF，放入有界队列；队满丢最旧并计数。"""
         try:
             for line in iter(proc.stdout.readline, ""):
-                out_q.put(line)
+                # 单行上限（同一处未接线的常量）：`print("x" * 10**8)` 这类
+                # **无换行**的超长输出会让 readline 一次性读进整行，
+                # 单行就能吃掉内存。超限则截断并显式标注，而不是静默。
+                if len(line) > _MAX_LINE_CHARS:
+                    line = line[:_MAX_LINE_CHARS] + f"…（本行超 {_MAX_LINE_CHARS} 字符已截断）\n"
+                while True:
+                    try:
+                        out_q.put_nowait(line)
+                        break
+                    except queue.Full:
+                        try:
+                            out_q.get_nowait()  # 腾一格：丢最旧
+                        except queue.Empty:
+                            pass
+                        dropped[0] += 1
+                        if dropped[0] > _MAX_QUEUE:
+                            break  # 极端情况下避免死循环（消费端完全不取）
         except Exception:  # noqa: BLE001
             logger.exception("终端会话读取失败 session=%s", session_id)
         finally:
             done.set()
-            out_q.put(None)  # EOF 哨兵
+            # EOF 哨兵必须能落队，否则 poll() 永远看不到"已结束"：
+            # 队满时先腾格再放，仍失败则放弃（此时消费端确实没在取）。
+            while True:
+                try:
+                    out_q.put_nowait(None)
+                    break
+                except queue.Full:
+                    try:
+                        out_q.get_nowait()
+                    except queue.Empty:
+                        break
 
     t = threading.Thread(target=_reader, daemon=True)
     t.start()
@@ -131,6 +178,8 @@ def start(command: str) -> dict:
             "offset": 0,
             "done": done,
             "buffer": [],
+            "dropped": dropped,
+            "dropped_reported": 0,
             "last_active": time.time(),
         }
     audit("runterm_start", outcome="started", session_id=session_id, pid=proc.pid,
@@ -180,10 +229,19 @@ def poll(session_id: str) -> dict:
         overflow = len(sess["buffer"]) - _MAX_OUTPUT_BUFFER
         del sess["buffer"][:overflow]
 
+    # 上报"本次 poll 期间因队列满被丢弃的行数"（增量，不重复计数）。
+    # 有界队列是**静默丢数据**的设计，必须让调用方知道丢过东西，
+    # 否则前端会以为"输出就这么多"，把不完整当成完整。
+    total_dropped = sess.get("dropped", [0])[0]
+    reported = sess.get("dropped_reported", 0)
+    new_dropped = max(0, total_dropped - reported)
+    sess["dropped_reported"] = total_dropped
+
     return {
         "lines": new_lines,
         "running": sess["proc"].poll() is None,
         "exit_code": sess["proc"].poll(),
+        "dropped": new_dropped,
     }
 
 

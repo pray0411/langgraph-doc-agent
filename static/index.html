@@ -1067,6 +1067,12 @@ async function ask() {
   let sources = [];
   let reflection = '';
   let sawToken = false;
+  // 待用户确认的高危命令（来自结构化 need_confirm 事件：{nonce, command, reason}）。
+  // 用数组而不是单值：一轮里可能有多条待确认命令，旧实现只保留最后一条。
+  const pendingConfirms = [];
+  // 确认后要续问的问题。必须在 try 之外声明 —— 续问要等 finally 把
+  // isStreaming 复位之后才能发（ask() 开头有这个守卫），见函数末尾。
+  let followUpQuestion = null;
 
   try {
     const resp = await fetch('/ask/stream', {
@@ -1089,7 +1095,6 @@ async function ask() {
     let usage = null;
     let cost = null;
     let toolWarns = [];
-    let pendingConfirm = null;  // 高危命令待用户确认 {command, confirmed}
 
     // 流式渲染节流：token 累积，定时刷新（避免每个 token 全量重渲染卡顿）
     let renderTimer = null;
@@ -1130,28 +1135,32 @@ async function ask() {
           toolShown = true;
           // 尾部指示器切换为"正在调用工具"
           if (thinkingText) thinkingText.textContent = '正在调用 ' + ev.name + ' …';
+        } else if (ev.type === 'need_confirm') {
+          // 高危命令待确认：**结构化事件**（按 type 识别、按字段渲染），
+          // 不再用正则去匹配文案。旧实现是拿正则去
+          // 匹配工具返回文案里的那条确认提示串，后端文案一改
+          // （本轮前缀变成"命中高危模式（…）"）就再也匹配不上，弹窗静默消失
+          // —— 而那个弹窗是整条链上**唯一**的人为护栏。
+          if (ev.command && ev.nonce) {
+            pendingConfirms.push({ nonce: ev.nonce, command: ev.command, reason: ev.reason || '' });
+          }
         } else if (ev.type === 'tool_done') {
           // 工具完成：移除"正在调用"状态条，恢复"正在思考"
           removeToolStatus();
           if (thinkingText) thinkingText.textContent = '正在思考…';
-          // 高危命令待确认：工具返回 NEED_CONFIRM，收集命令供结束后弹窗
           const r = (ev.result || '').trim();
-          const confirmMatch = r.match(/NEED_CONFIRM 需要用户确认：高危命令 \[([^\]]+)\]/);
-          if (confirmMatch) {
-            pendingConfirm = { command: confirmMatch[1] };
-          }
-          // 工具异常检测：run_command 的所有返回（成功/失败/拦截/超时/待确认）
+          // 工具异常检测：run_command 的所有受控返回（成功/失败/拦截/超时/待确认）
           // 都是正常执行结果，AI 会在回答中转述，不显示红条。
-          // 其他工具（检索/搜索/天气）真出错时才警告。
-          const isRunCmdResult = /^[❌✅] (执行成功|执行失败)（exit \d+）/.test(r)
-            || /^NEED_CONFIRM /.test(r)
-            || /^⛔ /.test(r)
-            || /^⏱ /.test(r);
-          if (!isRunCmdResult && r && /失败|错误|无法|没有搜索|查无|超时|error|fail/i.test(r)) {
+          // status 由**服务端**归一（graph._result_status）——旧实现是前端自己
+          // 正则匹配这些文案前缀，等于把协议又编码进了文案里：改一次文案就
+          // 静默失效，正是确认弹窗消失（P0-3）的同一种病。
+          const CONTROL_STATUSES = ['ok', 'failed', 'need_confirm', 'blocked', 'timeout'];
+          if (!CONTROL_STATUSES.includes(ev.status)
+              && r && /失败|错误|无法|没有搜索|查无|超时|error|fail/i.test(r)) {
             toolWarns.push(r.slice(0, 80));
             const warn = document.createElement('div');
             warn.className = 'tool-warn';
-            warn.textContent = '⚠️ 工具异常：' + r.slice(0, 80);
+            warn.textContent = '⚠️ 工具异常' + (ev.name ? '（' + ev.name + '）' : '') + '：' + r.slice(0, 80);
             chatInner.appendChild(warn);
             scrollBottom();
           }
@@ -1178,29 +1187,41 @@ async function ask() {
     flushRender();
     if (!answer) bubble.textContent = '（无回答）';
 
-    // 高危命令待确认：弹窗询问用户，确认后登记批准并续问执行
-    if (pendingConfirm) {
-      const cmd = pendingConfirm.command;
-      const allow = confirm('⚠️ AI 想执行高危命令：\n\n' + cmd + '\n\n是否允许执行？');
-      if (allow) {
-        // 1. 后端登记批准（run_command 校验 confirmed=True 时必须命中此记录）
-        try {
-          await fetch('/api/approve', {
-            method: 'POST',
-            headers: authHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
-            body: 'command=' + encodeURIComponent(cmd)
-          });
-        } catch (e) { /* 登记失败则继续，服务端会拒绝未登记的执行 */ }
-        // 2. 追加"确认执行"消息，重新触发流式问答
-        addMessage('user', '✅ 已确认执行命令：' + cmd);
-        const q = '请继续执行命令：' + cmd + '（用户已确认）';
-        input.value = q;
-        ask();
-        return;  // 让新的 ask() 接管渲染
-      } else {
+    // 高危命令待确认：逐条弹窗（**每条都显示完整命令**），用户确认后用
+    // 服务端签发的 nonce 换一次性批准，再续问执行。
+    //
+    // 这一处修了三个断点（外部评审 P0-1 / P0-3）：
+    //   1) 旧实现收集时只保留最后一条（pendingConfirm 被后一条覆盖）；
+    //   2) 旧实现直接 POST 已删除的自助登记接口 **自助登记批准** —— 等于闸门不存在；
+    //      现在必须带服务端签发的 nonce，且确认的命令必须与展示的一致；
+    //   3) 旧实现在 isStreaming 仍为 true 时递归调 ask()，被 ask() 开头的
+    //      `if (!question || isStreaming) return;` 挡掉 —— "确认后自动续问"
+    //      实际上从未执行过。现在改为等本轮的 finally 复位之后再发（见函数末尾）。
+    for (const pc of pendingConfirms) {
+      const cmd = pc.command;
+      const allow = confirm(
+        '⚠️ AI 想执行高危命令：\n\n' + cmd
+        + (pc.reason ? '\n\n原因：' + pc.reason : '')
+        + '\n\n是否允许执行？'
+      );
+      if (!allow) {
         addMessage('assistant', '⛔ 已拒绝执行高危命令：' + cmd, { raw: true });
         toast('已拒绝高危命令');
+        continue;
       }
+      const cr = await fetch('/api/confirm', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
+        body: new URLSearchParams({ nonce: pc.nonce, command: cmd }).toString(),
+      }).then(r => r.json()).catch(e => ({ error: String(e) }));
+      if (cr.error) {
+        // 旧实现把这里的失败整条吞掉了（.catch(() => {})），401 与协议错误都静默；
+        // 现在必须让用户看见，否则"点了确认却没生效"根本无从判断。
+        if (!handleAuthError(cr)) addMessage('assistant', '⚠️ 确认失败：' + cr.error, { raw: true });
+        continue;
+      }
+      addMessage('user', '✅ 已确认执行命令：' + cmd);
+      followUpQuestion = '请继续执行命令：' + cmd + '（用户已确认）';
     }
 
     // 渲染来源卡片
@@ -1211,8 +1232,16 @@ async function ask() {
         const a = document.createElement('a');
         a.className = 'source-card';
         if (s.type === 'web' && s.url) {
-          a.href = s.url; a.target = '_blank'; a.rel = 'noopener';
-          a.innerHTML = '<span class="source-icon">🔗</span><span><span class="source-title">' + esc(s.title || s.url) + '</span><br><span class="source-preview">' + esc(s.url) + '</span></span>';
+          // 只允许 http(s) 落地为可点击链接：搜索结果的 URL 来自外部，
+          // `a.href = 'javascript:...'` 会在点击时执行脚本（老代码直接赋值，
+          // 没有任何 scheme 校验）。非 http(s) 一律降级成纯文本展示。
+          const safeUrl = /^https?:\/\//i.test(s.url) ? s.url : '';
+          if (safeUrl) {
+            a.href = safeUrl; a.target = '_blank'; a.rel = 'noopener';
+            a.innerHTML = '<span class="source-icon">🔗</span><span><span class="source-title">' + esc(s.title || safeUrl) + '</span><br><span class="source-preview">' + esc(safeUrl) + '</span></span>';
+          } else {
+            a.innerHTML = '<span class="source-icon">🔗</span><span><span class="source-title">' + esc(s.title || '(来源链接已省略)') + '</span><br><span class="source-preview">' + esc(s.url) + '</span></span>';
+          }
         } else {
           a.innerHTML = '<span class="source-icon">📄</span><span><span class="source-title">' + esc(s.title) + '</span><br><span class="source-preview">' + esc(s.preview || '') + '</span></span>';
         }
@@ -1244,6 +1273,15 @@ async function ask() {
   } finally {
     isStreaming = false;
     btn.disabled = false;
+  }
+
+  // 确认后的续问必须放在 finally **之后**：finally 里才复位 isStreaming，
+  // 而 ask() 开头有 `if (!question || isStreaming) return;` 守卫 ——
+  // 旧实现在 try 里递归调 ask()，看着是"确认后自动续问"，实际每次都被这条
+  // 守卫挡回去，从来没执行过（外部评审指出的第二个断点）。
+  if (followUpQuestion) {
+    input.value = followUpQuestion;
+    ask();
   }
 }
 
@@ -1445,8 +1483,26 @@ function openTerminal(code, codeId) {
         : 'python ' + tmpName;
     }
 
-    // 启动进程（用户点击运行=确认命令，先登记批准供高危命令通过）
-    await api('/api/approve', { command: cmd }).catch(() => {});
+    // 启动进程：先 prepare 让**服务端**分级并（必要时）签发确认挑战。
+    // 旧实现在这里自动调那个已删除的自助登记接口把命令登记成"用户已批准"，
+    // 于是后端那道闸在真实使用路径上永远通过 —— 等于没有闸（外部评审 P0-1：
+    // 前端自己替用户点了"同意"）。现在高危命令必须展示完整命令并让用户
+    // 显式点一次，再用服务端签发的 nonce 换取一次性批准。
+    const prep = await api('/api/run/prepare', { command: cmd });
+    if (prep.error) { print(prep.error); return; }
+    if (prep.need_confirm) {
+      // 展示与执行必须用**服务端返回的**那一条，避免"给你看的"和"要跑的"不一致
+      const shown = prep.command;
+      const allow = confirm(
+        '⚠️ 这条命令需要确认后才能运行：\n\n' + shown
+        + (prep.reason ? '\n\n原因：' + prep.reason : '')
+        + '\n\n是否允许执行？'
+      );
+      if (!allow) { print('⛔ 已取消执行（用户拒绝）\n'); return; }
+      const conf = await api('/api/confirm', { nonce: prep.nonce, command: shown });
+      if (conf.error) { print('⚠️ 确认失败：' + conf.error + '\n'); return; }
+      cmd = shown;
+    }
     const startResp = await api('/api/run/start', { command: cmd });
     if (startResp.error) { print(startResp.error); return; }
     const sid = startResp.session_id;
@@ -1460,6 +1516,9 @@ function openTerminal(code, codeId) {
           const resp = await fetch('/api/run/output?session_id=' + encodeURIComponent(sid), { headers: authHeaders({}) });
           const data = await resp.json();
           if (data.lines && data.lines.length) print(data.lines.join(''));
+          // 有界队列会丢**最旧**的输出（防内存被打满）：丢过就必须说，
+          // 否则用户会把不完整的输出当成完整的（外部评审 P0-4）。
+          if (data.dropped) print('\n[输出过快，已省略 ' + data.dropped + ' 行]\n');
           if (data.running === false) {
             print('\n[进程已结束 exit ' + (data.exit_code ?? '?') + ']');
             inputEl.disabled = true;

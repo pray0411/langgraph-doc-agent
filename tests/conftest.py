@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """测试公共夹具与全局守卫。
 
 本文件承担三件事，都是为了让"测试通过"这句话**在别人的机器上同样成立**：
@@ -413,7 +412,7 @@ class FakeLLM:
                 self.send_header("Connection", "close")
                 self.end_headers()
                 for chunk in outer.stream_chunks(resp, req):
-                    self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8"))
+                    self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode())
                     self.wfile.flush()
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
