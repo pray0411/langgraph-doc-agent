@@ -44,5 +44,14 @@ echo ============================================================
 echo   Done.  Executable:  dist\Pray\Pray.exe
 echo   Double-click it to run (no Python required on target PC).
 echo ============================================================
+
+rem ---------- carry over .env so the exe finds the API key ----------
+if exist ".env" (
+    copy /y ".env" "dist\Pray\.env" >nul
+    echo   Copied .env next to Pray.exe
+) else (
+    echo   [WARN] No .env in project root - create dist\Pray\.env manually
+    echo          before running the exe.
+)
 echo.
 pause

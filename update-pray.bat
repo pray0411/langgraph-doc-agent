@@ -72,6 +72,12 @@ echo ============================================================
 echo   Updated.  New executable:  dist\Pray\Pray.exe
 echo   Your desktop shortcut already points there - just run it.
 echo ============================================================
+if exist ".env" (
+    copy /y ".env" "dist\Pray\.env" >nul
+    echo   Copied .env next to Pray.exe
+) else (
+    echo   [WARN] No .env in project root - create dist\Pray\.env manually.
+)
 echo.
 pause
 exit /b 0
