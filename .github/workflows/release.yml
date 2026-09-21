@@ -54,7 +54,7 @@ jobs:
         env:
           PYTHONUTF8: "1"
         run: pyinstaller --clean --noconfirm Pray.spec
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Pray-windows
           path: dist/**

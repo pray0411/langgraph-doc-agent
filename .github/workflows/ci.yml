@@ -59,7 +59,7 @@ jobs:
 
       - name: 上传测试报告
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-${{ matrix.os }}-py${{ matrix.python-version }}
           path: |
@@ -92,7 +92,7 @@ jobs:
         run: python -X utf8 -m pytest tests/e2e -m e2e -q
       - name: 上传失败时的截图/追踪
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-artifacts
           path: |
