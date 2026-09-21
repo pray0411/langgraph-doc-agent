@@ -38,8 +38,10 @@ def write_file(file_path: str, content: str) -> str:
         file_path: 目标文件路径（如 "guess_game.py" 或 "scripts/guess_game.py"）
         content: 要写入的文件完整内容
     """
-    from config import WRITE_DIR
+    from config import WRITE_DIR, unsafe_path_reason
 
+    if (why := unsafe_path_reason(file_path)) is not None:
+        return f"拒绝写入：{why}"
     write_root = Path(WRITE_DIR).resolve()
     target = (write_root / file_path).resolve()
     # 安全校验：目标路径必须位于 WRITE_DIR 内（防 ../ 逃逸）
@@ -53,10 +55,17 @@ def write_file(file_path: str, content: str) -> str:
         return f"写入失败: {exc}"
 
 
-def _safe_target(file_path: str, *, must_exist: bool) -> tuple[Path, Path] | str:
-    """校验 file_path 位于 WRITE_DIR 内，返回 (write_root, target)；不合法返回错误串。"""
-    from config import WRITE_DIR
+def _safe_target(
+    file_path: str, *, must_exist: bool, allow_empty: bool = False
+) -> tuple[Path, Path] | str:
+    """校验 file_path 位于 WRITE_DIR 内，返回 (write_root, target)；不合法返回错误串。
 
+    `allow_empty=True` 供 `list_files` 这类"空串即根目录"的调用方使用。
+    """
+    from config import WRITE_DIR, unsafe_path_reason
+
+    if (why := unsafe_path_reason(file_path, allow_empty=allow_empty)) is not None:
+        return f"拒绝访问：{why}"
     write_root = Path(WRITE_DIR).resolve()
     target = (write_root / file_path).resolve()
     if not target.is_relative_to(write_root):
@@ -125,7 +134,8 @@ def list_files(path: str = "") -> str:
     """
     import time as _time
 
-    checked = _safe_target(path, must_exist=False)
+    # 空串 = 列 WRITE_DIR 根目录，是合法用法（"路径为空"不是越界）
+    checked = _safe_target(path, must_exist=False, allow_empty=True)
     if isinstance(checked, str):
         return checked
     write_root, target = checked
@@ -732,8 +742,10 @@ def open_in_browser(file_path: str) -> str:
     import os
     import subprocess as _sp
 
-    from config import WRITE_DIR
+    from config import WRITE_DIR, unsafe_path_reason
 
+    if (why := unsafe_path_reason(file_path)) is not None:
+        return f"拒绝打开：{why}"
     write_root = Path(WRITE_DIR).resolve()
     target = (write_root / file_path).resolve()
     if not target.is_relative_to(write_root):

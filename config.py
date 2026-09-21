@@ -1,5 +1,6 @@
 """全局配置：从环境变量读取，未配置时使用默认值。"""
 import os
+import re
 import threading as _threading
 from pathlib import Path
 
@@ -37,6 +38,55 @@ WRITE_DIR = Path(os.getenv("WRITE_DIR", str(BASE_DIR / "generated")))
 # 独立成配置项的原因：上传文档既要在 http 层落盘，又要在检索层重建索引，
 # 两边必须指向同一个目录，否则"文件在、检索不到"。
 UPLOADS_DIR = Path(os.getenv("UPLOADS_DIR", str(WRITE_DIR / "uploads")))
+
+
+# ---------- 平台无关的路径安全检查 ----------
+#
+# 为什么不能只靠 `Path.is_absolute()` + `is_relative_to()`：
+# 这两个判据都是**平台相关**的，于是同一份代码在两个平台上的安全边界不一致。
+# CI 的 ubuntu 矩阵把它抓了出来（Windows 三个组合全绿、ubuntu 三个组合各挂 2 条）：
+#
+#   - `C:/Windows/system32/x.txt`：Linux 上不是绝对路径 → 被拼成
+#     `<WRITE_DIR>/C:/Windows/system32/x.txt`，`is_relative_to` 判定"在目录内" → 放行，
+#     在 WRITE_DIR 下留下一个怪名字文件；Windows 上盘符路径会替换 base → 正确拒绝。
+#   - `..\escape.py`：Linux 上反斜杠只是普通文件名字符，不构成".."段 → 放行；
+#     Windows 上正常识别为穿越 → 拒绝。
+#
+# 结论：判据必须只看**字符串形态**，不依赖运行平台 —— 任何平台的绝对路径写法、
+# 任何分隔符下的 `..` / `~` 段，一律拒绝。代价是 Linux 上个别"文件名里带反斜杠"
+# 的合法路径会被误伤（极少见）；相比之下"边界随平台漂移"是更糟的问题。
+_UNC_PATH_RE = re.compile(r"^(\\\\|//)")
+_ABS_POSIX_RE = re.compile(r"^/")
+_ABS_WIN_DRIVE_RE = re.compile(r"^[A-Za-z]:")  # C:\ / C:/ / C:foo
+_PATH_SEP_RE = re.compile(r"[\\/]+")
+
+
+def unsafe_path_reason(path: str, *, allow_empty: bool = False) -> str | None:
+    """检查路径是否越出 WRITE_DIR 语义边界。返回拒绝原因；None 表示通过。
+
+    `allow_empty`：空串表示"根目录"的调用方（如 `list_files` 列根目录）传 True。
+    "路径是不是空的"属于**调用方该回答的问题**（写文件不允许空、列目录允许空），
+    不是"是否越界"的问题 —— 两者混在一起会让 `list_files("")` 被误拒。
+
+    调用方仍应叠加 `is_relative_to` 做最终确认（符号链接等仍需 realpath 判定），
+    本函数负责堵住"平台差异导致的判据失效"。
+    """
+    if path is None:
+        return None if allow_empty else "路径为空"
+    raw = str(path).strip()
+    if not raw:
+        return None if allow_empty else "路径为空"
+    if _UNC_PATH_RE.match(raw):
+        return f"不接受 UNC/网络路径：{path}"
+    if _ABS_POSIX_RE.match(raw):
+        return f"不接受绝对路径：{path}"
+    if _ABS_WIN_DRIVE_RE.match(raw):
+        return f"不接受盘符绝对路径：{path}"
+    for seg in _PATH_SEP_RE.split(raw):
+        if seg in ("..", "~"):
+            return f"路径含越界段 {seg}：{path}"
+    return None
+
 
 # 多轮会话记忆存储（SQLite checkpointer）
 MEMORY_DB = os.getenv("MEMORY_DB", str(BASE_DIR / "data" / "memory.sqlite"))

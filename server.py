@@ -1119,13 +1119,16 @@ class Handler(BaseHTTPRequestHandler):
         """把代码写入 generated/ 临时文件（交互终端用），带路径安全校验。"""
         from pathlib import Path
 
-        from config import WRITE_DIR
+        from config import WRITE_DIR, unsafe_path_reason
 
         data = self._read_form()
         path = (data.get("path") or [""])[0].strip()
         content = (data.get("content") or [""])[0]
         if not path:
             self._json({"error": "缺少 path"}, 400)
+            return
+        if (why := unsafe_path_reason(path)) is not None:
+            self._json({"error": why}, 400)
             return
         write_root = Path(WRITE_DIR).resolve()
         target = (write_root / path).resolve()

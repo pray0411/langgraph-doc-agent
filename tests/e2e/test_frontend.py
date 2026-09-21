@@ -16,7 +16,9 @@
 
 未安装时本目录整体 skip（不阻断主测试套件），CI 里有独立的 e2e job 会装。
 """
+import os
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +30,40 @@ pw = pytest.importorskip(
 )
 sync_playwright = pw.sync_playwright
 expect = pw.expect
+
+
+def _normalize_browsers_path() -> None:
+    """修正 `PLAYWRIGHT_BROWSERS_PATH` 与实际安装位置不一致的情况。
+
+    为什么需要这一步（CI 实测出来的错配）：`.github/workflows/ci.yml` 的 e2e job
+    只在**跑测试**那一步设了 `PLAYWRIGHT_BROWSERS_PATH: "0"`，而
+    `python -m playwright install --with-deps chromium` 那一步**没设** ——
+    于是浏览器被装进 `~/.cache/ms-playwright/`，测试却去
+    `<site-packages>/playwright/driver/package/.local-browsers/` 找，报
+    `Executable doesn't exist at .../chromium_headless_shell-1194/...`，
+    6 条用例全 ERROR。**报错信息看起来像"前端坏了"，实际是环境变量只在半步生效。**
+
+    这里不去掩盖它，也不硬编码任何路径：只在**确认目标目录里确实没有 chromium**
+    时才撤销这个变量，让 Playwright 回落到它自己的默认缓存目录；
+    真正两处都没有的机器仍会在下面 skip，并提示装法。
+    """
+    val = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if not val:
+        return
+    if val == "0":
+        # "0" 的语义是"装在 playwright 包目录内"，据此还原出实际路径
+        target = Path(pw.__file__).resolve().parent / "driver" / "package" / ".local-browsers"
+    else:
+        target = Path(val)
+    try:
+        has_chromium = target.is_dir() and any(target.glob("chromium*"))
+    except OSError:
+        has_chromium = False
+    if not has_chromium:
+        os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+
+
+_normalize_browsers_path()
 
 
 @pytest.fixture()
@@ -64,9 +100,21 @@ def live_server(monkeypatch):
 
 @pytest.fixture(scope="module")
 def browser():
-    """模块级共享一个 Chromium 实例（起浏览器是本目录里最贵的一步）。"""
+    """模块级共享一个 Chromium 实例（起浏览器是本目录里最贵的一步）。
+
+    起不来时 **skip 而不是 ERROR**：`playwright` 驱动装好了、但浏览器二进制没装，
+    和"前端真的有 bug"是两件事，在 CI 上必须能区分开。已经有 `importorskip`
+    挡住"驱动都没装"的情况，这里补上"驱动在、浏览器不在"这一档。
+    """
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        try:
+            browser = p.chromium.launch()
+        except pw.Error as exc:  # 二进制缺失 / 启动失败
+            pytest.skip(
+                "Chromium 不可用，跳过浏览器用例。"
+                "请执行 `python -m playwright install --with-deps chromium`。"
+                f"原因：{exc}"
+            )
         try:
             yield browser
         finally:

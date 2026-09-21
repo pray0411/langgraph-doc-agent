@@ -511,7 +511,10 @@ def test_run_write_rejects_path_escape(web):
     status, body = _post(web.base, "/api/run/write",
                          {"path": "../outside.py", "content": "print('escaped')"})
     assert status == 400
-    assert "超出允许目录" in json.loads(body)["error"]
+    # 断言"被拒绝"这个不变式，而不是某句具体文案：越界原因有多种
+    # （`..` 段、绝对路径、盘符、UNC），文案由守卫给出，不该被测试钉死。
+    err = json.loads(body)["error"]
+    assert ("超出允许目录" in err) or ("越界" in err) or ("不接受" in err), err
     # 逃逸目标绝不能真的被创建
     assert not (web.write_dir.parent / "outside.py").exists()
 

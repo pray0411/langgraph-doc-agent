@@ -1928,7 +1928,9 @@ def test_read_file_rejects_escape_and_binary(monkeypatch, tmp_path):
     (tmp_path / "bin.dat").write_bytes(b"\x00\x01\x02")
     from tools import read_file
 
-    assert "超出" in read_file.invoke({"file_path": "../../etc/passwd"})
+    # 断言"被拒绝"而非具体文案：越界判据是平台无关的（见 config.unsafe_path_reason），
+    # 不同写法给出的原因不同（.. 段 / 绝对路径 / 盘符 / UNC），文案不该被钉死。
+    assert "拒绝" in read_file.invoke({"file_path": "../../etc/passwd"})
     assert "不存在" in read_file.invoke({"file_path": "nope.py"})
     assert "二进制" in read_file.invoke({"file_path": "bin.dat"})
 

@@ -692,3 +692,68 @@ def test_public_bind_auto_generates_token(monkeypatch):
     # 回环绑定（默认）保持零配置体验
     monkeypatch.setattr(config_mod, "API_TOKEN", "")
     assert server_mod.enforce_token_for_public_bind("127.0.0.1") == ""
+
+
+def test_path_guard_rejects_foreign_absolute_and_backslash_escape():
+    r"""路径守卫必须**与运行平台无关**地拒绝越界写法。
+
+    为什么需要这条用例：CI 的 ubuntu 矩阵三个组合各挂 2 条、Windows 三个组合全绿，
+    失败面完全按平台切分——说明判据依赖了平台语义，而不是字符串形态：
+
+      - `C:/Windows/system32/x.txt`：Linux 上 `isabs()` 为假 → 被拼进 WRITE_DIR 内放行；
+      - `..\\escape.py`：Linux 上反斜杠只是普通文件名字符，不构成 `..` 段 → 放行。
+
+    而 `test_write_file_rejects_path_escape` / `test_run_write_cannot_escape_write_dir`
+    这两条在 Windows 上**修复前就是绿的**（Windows 语义天然拒绝），所以退化只会被
+    Linux 抓到。这里直接断言守卫函数本身：无论在哪台机器上跑，判据必须一致。
+    """
+    from config import unsafe_path_reason
+
+    must_reject = [
+        "C:/Windows/system32/x.txt",   # Windows 盘符 + 正斜杠
+        "C:\\Windows\\system32\\x.txt",  # Windows 盘符 + 反斜杠
+        "C:x.txt",                     # 盘符相对写法（Windows 上也是绝对的）
+        "/etc/passwd",                 # POSIX 绝对
+        "\\\\server\\share\\x.txt",      # UNC
+        "//server/share/x.txt",        # 双斜杠
+        "..\\escape.py",               # 反斜杠穿越（Windows 形态）
+        "../escape.py",                # 正斜杠穿越
+        "a/../../escape.py",
+        "a\\..\\..\\escape.py",
+        "~/secret.txt",
+        "subdir/~/secret.txt",
+    ]
+    for p in must_reject:
+        assert unsafe_path_reason(p) is not None, f"应判为越界：{p!r}"
+
+    # 正常相对路径必须放行，否则守卫就成了"一律拒绝"，功能不可用
+    for p in ("guess_game.py", "scripts/guess_game.py", "a/b/c.md", ".hidden"):
+        assert unsafe_path_reason(p) is None, f"正常相对路径不应被拒：{p!r}"
+
+    # 空路径：默认视为非法（写文件/读文件都必须给出文件名）……
+    assert unsafe_path_reason("") is not None
+    assert unsafe_path_reason("   ") is not None
+    # ……但"空串即根目录"是 list_files 的合法用法，必须能放行。
+    # 这条锁住一次真实回归：守卫最初把空串一律判为"路径为空"，
+    # 于是 `list_files(path="")` 被拒，工具直接不可用。
+    assert unsafe_path_reason("", allow_empty=True) is None
+    assert unsafe_path_reason("../x", allow_empty=True) is not None, \
+        "allow_empty 只豁免空串，不得顺带放过越界路径"
+
+
+def test_write_file_uses_platform_independent_guard(monkeypatch, tmp_path):
+    """write_file 必须调用守卫，而不是只靠 `is_relative_to`（Linux 上会漏）。
+
+    与上一条配合：单测守卫的正确性，这里锁住"真的接上了"——守卫写对了但忘了
+    接到调用点，同样是零防护。
+    """
+    import config as config_mod
+    from tools import write_file
+
+    monkeypatch.setattr(config_mod, "WRITE_DIR", str(tmp_path))
+
+    before = list(tmp_path.iterdir())
+    for p in ("C:/Windows/system32/x.txt", "..\\escape.py", "/etc/passwd"):
+        out = write_file.invoke({"file_path": p, "content": "x"})
+        assert "拒绝" in out, f"{p!r} 应被拒绝，实际：{out}"
+    assert list(tmp_path.iterdir()) == before, "被拒绝的写入不得在目录里留下任何文件"
