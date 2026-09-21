@@ -1,0 +1,81 @@
+name: Release
+
+# 打 tag 自动出包（待办 C12）。
+# 为什么值得做：`Pray.spec`（PyInstaller）早就存在，但"怎么用它出 Windows exe"
+# 只写在某人脑子里 —— 发布变成手工活，版本号也就更容易和 tag 对不上。
+# 现在把发布变成"打一个 tag"这一件事。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # 创建 Release 需要写权限
+
+jobs:
+  # ---------- 先校验：tag 必须与 VERSION 文件一致 ----------
+  # 版本号单一来源是 VERSION 文件（见 config.APP_VERSION）。
+  # 如果 tag 写成了 v9.9.9 而 VERSION 还是 1.1.0，打出来的包里外版本不一致 ——
+  # 这正是"三处版本号各不相同"那类缺陷的翻版，必须在发版前拦下。
+  verify-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "VERSION 文件: $version"
+      - name: 校验 tag 与 VERSION 一致
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="${{ steps.read.outputs.version }}"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag ($tag) 与 VERSION 文件 ($version) 不一致"
+            exit 1
+          fi
+
+  # ---------- 构建 Windows 可执行文件 ----------
+  build-windows:
+    needs: verify-version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-desktop.txt pyinstaller
+      - name: PyInstaller 打包（使用仓库内 Pray.spec）
+        env:
+          PYTHONUTF8: "1"
+        run: pyinstaller --clean --noconfirm Pray.spec
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Pray-windows
+          path: dist/**
+          if-no-files-found: error
+
+  # ---------- 发布 Release ----------
+  release:
+    needs: [verify-version, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Pray-windows
+          path: dist
+      - name: 创建 / 更新 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # 自动生成 Release notes（按 PR / commit 归类）
+          generate_release_notes: true
+          name: "Pray v${{ needs.verify-version.outputs.version }}"
+          files: dist/**
+          # 草稿：先人工过一眼再发布，避免自动发出有问题的包
+          draft: true
