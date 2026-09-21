@@ -226,8 +226,16 @@ def test_model_output_cannot_execute_scripts(page, live_server, payload):
     )
     assert not [h for h in hrefs if h and h.lower().startswith("javascript:")]
 
-    # 4) 而载荷应当以**纯文本**形式可见（说明是被转义、而不是被丢弃）
-    expect(page.locator("#chatInner .answer-body")).to_contain_text("<", timeout=5000)
+    # 4) 而载荷应当以**纯文本**形式可见（说明是被转义、而不是被丢弃）。
+    #
+    # 旧断言固定检查 "<"，但第 4 个载荷 `[点我](javascript:window.__xss=4)`
+    # 里根本没有 "<" —— 该断言对它**无意义**，于是把一条其实完全安全的用例
+    # （脚本没执行、没活动元素、没有 javascript: href）判成失败。
+    # 改为断言"载荷原样可见"：对所有载荷都成立，且比原断言更强
+    # （原来只验了一个字符，现在验整个载荷没被丢）。
+    expect(page.locator("#chatInner .answer-body")).to_contain_text(payload, timeout=5000)
+    if "<" in payload:
+        expect(page.locator("#chatInner .answer-body")).to_contain_text("<", timeout=5000)
 
 
 # ---------- 畸形输入不崩溃 ----------
