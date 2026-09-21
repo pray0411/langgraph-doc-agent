@@ -7,6 +7,42 @@
 
 ## [Unreleased]
 
+### Fixed（CI 干净矩阵暴露的**平台相关性**缺陷 · 8/9 → 9/9）
+
+CI 首次真正跑起来后，结果按平台整齐切分：**Windows 三个 Python 组合全绿、
+Ubuntu 三个组合各挂同样的 2 条**（均 `2 failed / 280 passed / 6 skipped`）。
+失败面与 Python 版本无关、与依赖解析无关、也不是 flaky —— 指向某处代码
+**假设了 Windows 语义**：
+
+- **【P0】"目录边界"此前只在 Windows 上成立**：
+  - `C:/Windows/system32/x.txt`：Linux 上 `isabs()` 为假 → 被拼成
+    `<WRITE_DIR>/C:/Windows/system32/x.txt`，`is_relative_to` 判定"在目录内" → 放行；
+  - `..\escape.py`：Linux 上反斜杠只是普通文件名字符，不构成 `..` 段 → 放行。
+  - 修法：新增 `config.unsafe_path_reason()`，判据**只看字符串形态**（UNC / POSIX
+    绝对 / 盘符 / 任意分隔符下的 `..` 与 `~` 段），接进 `write_file`、
+    `_safe_target`（read / edit / list）与 `/api/run/write` 四处调用点；
+    `is_relative_to` 保留做符号链接等 realpath 判定。
+  - 代价：Linux 上"文件名含反斜杠"的合法路径会被误伤 —— 相比"边界随平台漂移"，
+    这是更可接受的一侧。
+- **测试侧的补强**：修复前那两条用例在 Windows 上**本来就是绿的**（Windows 语义
+  天然拒绝），所以退化只会被 Linux 抓到。新用例直接断言**守卫函数本身**
+  （平台无关），把"只能靠 CI 矩阵发现"变成"本机也能发现"。
+- **`allow_empty`**：守卫最初把空串一律判为"路径为空"，而 `list_files(path="")`
+  的语义是"列根目录" → 工具直接不可用。改为由调用方声明 ——
+  "路径空不空"不是"是否越界"的问题。
+
+### Fixed（e2e · 报错全部指向错误方向）
+
+- **环境变量只在半步生效**：`PLAYWRIGHT_BROWSERS_PATH=0` 只设在跑测试那一步，
+  `playwright install --with-deps chromium` 那一步没设 → Chromium 装进
+  `~/.cache/ms-playwright/`，测试却去 `<site-packages>/.../.local-browsers/` 找，
+  6 条全 ERROR。**报错看着像"前端坏了"，实际是 env 错配。**
+- **修好后暴露出测试自身的缺陷**：XSS 用例第 4 条断言 `to_contain_text("<")`，
+  而载荷 `[点我](javascript:window.__xss=4)` 里根本没有 `<` —— 断言对它无意义，
+  把一条其实完全安全的用例（脚本没执行、无活动元素、无 `javascript:` href）
+  判成失败。改为 `to_contain_text(payload)`：对全部载荷成立，且更强
+  （原来只验一个字符，现在验整个载荷没被丢弃）；含 `<` 的载荷保留原检查。
+
 ### Security（第二轮外部评审 · 授权模型重做）
 
 第一轮把授权从"关键词黑名单"改成"默认拒绝 + 前端确认"。第二轮评审的结论很尖锐：
