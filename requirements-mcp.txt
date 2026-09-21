@@ -18,5 +18,5 @@
 # 也就是说"照文档 pip install -r requirements-mcp.txt"从来就跑不通，
 # 而本机环境是手工装出来的，所以一直没暴露。
 # 2.2.0 是与 fastmcp 4.0.3 实际匹配的版本（fastmcp 自身带的也是它）。
-fastmcp==4.0.3
+fastmcp==4.0.5
 mcp==2.2.0
