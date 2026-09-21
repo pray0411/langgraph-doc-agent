@@ -153,3 +153,27 @@ jobs:
       - run: pip install pip-audit==2.9.0
       - name: 扫描 requirements.txt
         run: pip-audit -r requirements.txt --desc
+
+  # ---------- 依赖可安装性 ----------
+  #
+  # 为什么要单独一个 job（外部评审第 4 条）：项目曾经在 README 里教人
+  # `pip install -r requirements-mcp.txt`，而该文件因版本冲突**根本装不上**
+  # （mcp==1.22.0 与 fastmcp==4.0.3 的依赖链互斥，pip 直接 ResolutionImpossible）。
+  # 本机因为早已装好相关包，`import` 一切正常，这个事实被掩盖了很久。
+  # 「照文档装依赖」必须是一条被 CI 守着的不变量，而不是靠运气。
+  #
+  # 实现放在 scripts/check_deps.py，与本地手动校验共用同一份逻辑 ——
+  # 两处各写一遍是漂移的开始。
+  deps-installable:
+    name: 依赖可安装性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 升级 pip
+        run: python -m pip install --upgrade pip
+      - name: 四个 requirements 文件都必须能被解析
+        run: python -X utf8 scripts/check_deps.py
