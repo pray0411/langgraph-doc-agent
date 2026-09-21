@@ -29,10 +29,13 @@ a = Analysis(
     ["desktop.py"],
     pathex=[SPECPATH],
     binaries=[],
-    datas=[("static", "static")],   # 前端页面打进包（server 从这里读 INDEX_HTML）
+    datas=[
+        ("static", "static"),   # 前端页面打进包（server 从这里读 INDEX_HTML）
+        ("VERSION", "."),       # 版本号随包分发（打包后 __file__ 在解包目录，config 从 _MEIPASS 读它）
+    ],
     hiddenimports=[
         "server", "graph", "tools", "retriever", "memory", "runterm",
-        "approvals", "prompts", "config",
+        "approvals", "prompts", "config", "logging_setup",
         # langgraph/langchain 动态导入较多，常见缺漏一并补上
         "langgraph.checkpoint.sqlite",
         "langgraph.prebuilt",

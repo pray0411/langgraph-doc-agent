@@ -1,27 +1,46 @@
 """全局配置：从环境变量读取，未配置时使用默认值。"""
 import os
 import re
+import sys
 import threading as _threading
 from pathlib import Path
 
+# ---------- 运行形态：源码运行 vs 打包（PyInstaller）运行 ----------
+#
+# 为什么必须区分：打包后 `__file__` 指向**临时解包目录**（`sys._MEIPASS`），
+# 而用户双击 exe 时的合理预期是"数据就在 exe 旁边"：
+#   - 可写数据（生成的文件 / 索引 / 会话与全局记忆 / 日志）若落在 _MEIPASS，
+#     进程退出后随临时目录一起消失 —— 表现为"生成的文件找不到""记忆不保留"
+#   - 只读资源（VERSION、static/ 前端）随包分发，仍从解包目录读
+_FROZEN = bool(getattr(sys, "frozen", False))
+_RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+BASE_DIR = Path(sys.executable).resolve().parent if _FROZEN else Path(__file__).resolve().parent
+
 try:
     from dotenv import load_dotenv
+    if _FROZEN:
+        # 打包运行时优先读 exe 同目录的 .env（用户把 API Key 写在 exe 旁边）；
+        # load_dotenv 默认不覆盖已存在的环境变量，显式路径优先符合直觉。
+        load_dotenv(BASE_DIR / ".env")
     load_dotenv()
 except ImportError:  # dotenv 未安装时静默跳过
     pass
-
-BASE_DIR = Path(__file__).resolve().parent
 
 # 版本号**单一来源**：仓库根目录的 VERSION 文件。
 # 为什么要有这个文件：此前 `desktop.py:APP_VERSION = "1.1.0"` 与 Release tag
 # 是两处独立维护的值，`pyproject.toml` 里还有第三个（0.9.0）—— 三者随时可能
 # 不一致，而"当前是什么版本"这种问题不该有歧义。现在统一为：VERSION 文件 →
 # config.APP_VERSION → desktop 读取；pyproject.toml 也动态引用它。
+# 打包运行时 VERSION 随包放在解包目录（见 Pray.spec 的 datas）。
 def _read_version() -> str:
-    try:
-        return (BASE_DIR / "VERSION").read_text(encoding="utf-8").strip() or "0.0.0"
-    except OSError:  # 打包/裁剪环境里文件缺失时不应让 import 失败
-        return "0.0.0"
+    for base in (_RESOURCE_DIR, BASE_DIR):
+        try:
+            text = (base / "VERSION").read_text(encoding="utf-8").strip()
+            if text:
+                return text
+        except OSError:  # 打包/裁剪环境里文件缺失时不应让 import 失败
+            continue
+    return "0.0.0"
 
 
 APP_VERSION = _read_version()

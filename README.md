@@ -140,16 +140,36 @@ python -X utf8 mcp_demo.py              # 内置演示客户端，无需第三�
 
 ### 桌面应用
 
+分为**直接使用**与**从源码打包**两条路径。
+
+**直接使用（推荐给最终用户）**：从 [Releases](https://github.com/pray0411/langgraph-doc-agent/releases) 下载 `Pray-<版本>-win64.zip`，解压后双击 `Pray.exe`。目标电脑**无需安装 Python**。首次使用需在同目录放置 `.env` 填写 API Key（同目录的 `.env.example` 可直接改名使用）；生成的代码、会话记忆、索引与日志都保存在 exe 同级目录，整个过程是绿色便携的。
+
+自检与排查：
+
+```bash
+Pray.exe --check                  # 输出页面状态、版本、provider、API Key 是否已配置、数据目录
+Pray.exe --no-update-check        # 跳过启动时的版本检查
+```
+
+**从源码运行 / 打包**：
+
 ```bash
 pip install -r requirements-desktop.txt
 python -X utf8 desktop.py             # 独立窗口（端口自动选空闲）
 python -X utf8 desktop.py --check     # 无窗口自检
 
-pip install pyinstaller               # 打包
+build_exe.bat                         # 一键打包（Windows；等价于下面两条命令）
+pip install pyinstaller
 pyinstaller Pray.spec --noconfirm --clean
 ```
 
-后台线程运行与网页版相同的服务，pywebview 使用系统 WebView（Windows 为 Edge WebView2），不引入 Chromium/Electron 体积。启动时异步检查 GitHub Releases，有新版本弹窗提示（不自动替换自身），`--no-update-check` 可关闭。`Pray.spec` 默认排除 torch / sentence-transformers，产物约 200 MB，检索自动回退纯 BM25。
+后台线程运行与网页版相同的服务，pywebview 使用系统 WebView（Windows 为 Edge WebView2），不引入 Chromium/Electron 体积。启动时异步检查 GitHub Releases，有新版本弹窗提示（不自动替换自身）。`Pray.spec` 默认排除 torch / sentence-transformers，产物约 70 MB（压缩包）/ 解压后约 200 MB，检索自动回退纯 BM25。
+
+打包后的路径语义：**只读资源**（`VERSION`、`static/`）随包分发、从解包目录读取；**可写数据**（`generated/`、`data/`、`index/`、`logs/`）与 `.env` 一律锚定到 exe 所在目录（`config.BASE_DIR` 在 frozen 模式下指向 exe 同级目录），否则数据会落在 PyInstaller 的临时目录里、进程退出即丢失。
+
+发布新版本：把 `VERSION` 与 `CHANGELOG.md` 更新后打 tag，在 GitHub Release 上传该 zip（exe 体积大，不进入仓库，`dist/` 已在 `.gitignore` 中）。
+
+> 仅想从源码 zip 快速跑起来（不打包 exe）：解压后双击 `启动.bat`，脚本会依次检查 Python、首次自动安装依赖、创建 `.env` 模板，然后启动桌面窗口（缺 pywebview 时回退网页版）。
 
 ## HTTP API
 

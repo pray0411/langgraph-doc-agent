@@ -154,7 +154,11 @@ def _update_check_worker():
 
 
 def self_check(port: int = 0) -> int:
-    """无窗口自检：起服务 → 请求首页确认 200 → 关闭。返回退出码。"""
+    """无窗口自检：起服务 → 请求首页确认 200 → 打印配置摘要 → 关闭。返回退出码。
+
+    打印 provider 与"API Key 是否已配置"（不回显密钥本身）以及数据目录，
+    便于用户排查"exe 有没有读到我放在旁边的 .env"。
+    """
     srv, url = start_server(port)
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
@@ -162,6 +166,15 @@ def self_check(port: int = 0) -> int:
             body = resp.read().decode("utf-8")
         assert "Pray" in body or "chatArea" in body, "首页内容异常"
         print(f"[self-check] OK: {url} 返回 200，页面 {len(body)} 字节")
+        try:
+            from config import APP_VERSION, BASE_DIR, LLM_PROVIDER, get_provider_config
+
+            cfg = get_provider_config(LLM_PROVIDER)
+            key_state = "已配置" if (cfg.get("api_key") or "").strip() else "缺失"
+            print(f"[self-check] 版本 {APP_VERSION} | provider={LLM_PROVIDER} | API Key={key_state}")
+            print(f"[self-check] 数据目录 {BASE_DIR}")
+        except Exception as exc:  # noqa: BLE001 - 自检摘要失败不影响通过判定
+            print(f"[self-check] 配置摘要不可用: {exc}")
         return 0
     except Exception as exc:  # noqa: BLE001
         print(f"[self-check] FAILED: {exc}")
