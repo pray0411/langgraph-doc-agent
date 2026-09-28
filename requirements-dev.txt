@@ -10,7 +10,7 @@ pytest==9.1.1
 pytest-cov==7.0.0
 pytest-timeout==2.4.0
 pytest-html==4.2.0          # CI 里生成可读报告（artifact）
-ruff==0.14.2                # lint + format
+ruff==0.16.9                # lint + format
 pip-audit==2.9.0            # 已知漏洞扫描（CI 里跑）
 
 # 读取检索评估集（tests/eval/qa.yaml）与 YAML 语法自检。
