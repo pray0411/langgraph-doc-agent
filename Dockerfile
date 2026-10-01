@@ -14,7 +14,7 @@
 #   - 容器以非 root 用户 `pray` 运行。
 #   - .env 通过 --env-file 注入，绝不 COPY 进镜像（见 .dockerignore）。
 
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 # 可选：构建时跳过沉重的语义检索依赖（sentence-transformers 会拉取 torch）。
 #   docker build --build-arg INSTALL_EMBEDDING=0 -t pray-agent .
