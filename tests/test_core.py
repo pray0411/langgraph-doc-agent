@@ -253,6 +253,147 @@ def test_config_defaults(monkeypatch):
     assert LLM_PROVIDER in ("deepseek", "openai", "qwen", "zhipu", "moonshot", "ollama")
 
 
+# ---------- 配置持久化（分发可用性：填一次、重启仍生效） ----------
+
+def test_persist_provider_config_creates_env(monkeypatch, tmp_path):
+    """首次保存应创建 .env，并写入 provider 与对应 Key 变量。"""
+    import config
+
+    monkeypatch.setattr(config, "BASE_DIR", tmp_path)
+    env_path = config.persist_provider_config("deepseek", "sk-test-123")
+
+    assert env_path == tmp_path / ".env"
+    text = env_path.read_text(encoding="utf-8")
+    assert "LLM_PROVIDER=deepseek" in text
+    assert "DEEPSEEK_API_KEY=sk-test-123" in text
+
+
+def test_persist_provider_config_merges_without_losing_other_keys(monkeypatch, tmp_path):
+    """保存时必须保留用户已有的其他配置与注释，只更新自己负责的键。"""
+    import config
+
+    monkeypatch.setattr(config, "BASE_DIR", tmp_path)
+    (tmp_path / ".env").write_text(
+        "# 我自己的注释\n"
+        "TOP_K=9\n"
+        "DEEPSEEK_API_KEY=old-key\n"
+        "BOCHA_API_KEY=bocha-keep\n",
+        encoding="utf-8",
+    )
+
+    config.persist_provider_config("deepseek", "sk-new-key")
+
+    text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "# 我自己的注释" in text          # 注释保留
+    assert "TOP_K=9" in text                 # 无关配置保留
+    assert "BOCHA_API_KEY=bocha-keep" in text
+    assert "DEEPSEEK_API_KEY=sk-new-key" in text
+    assert "old-key" not in text             # 目标键被更新
+    assert text.count("DEEPSEEK_API_KEY=") == 1  # 不重复追加
+
+
+def test_persist_provider_config_survives_restart(monkeypatch, tmp_path):
+    """持久化后新进程能读回（用 dotenv_values 模拟下次启动的读取）。"""
+    import dotenv
+
+    import config
+
+    monkeypatch.setattr(config, "BASE_DIR", tmp_path)
+    config.persist_provider_config("openai", "sk-openai-xyz", model="gpt-4o-mini")
+
+    values = dotenv.dotenv_values(tmp_path / ".env")
+    assert values["LLM_PROVIDER"] == "openai"
+    assert values["OPENAI_API_KEY"] == "sk-openai-xyz"
+    assert values["LLM_MODEL"] == "gpt-4o-mini"
+
+
+def test_persist_provider_config_rejects_bad_input(monkeypatch, tmp_path):
+    """未知 provider / 空 Key 应拒绝，且不创建文件。"""
+    import config
+
+    monkeypatch.setattr(config, "BASE_DIR", tmp_path)
+    with pytest.raises(ValueError):
+        config.persist_provider_config("unknown-provider", "sk-x")
+    with pytest.raises(ValueError):
+        config.persist_provider_config("deepseek", "   ")
+    assert not (tmp_path / ".env").exists()
+
+
+def _post_config(base, provider="deepseek", key="sk-http-test", **extra):
+    data = {"provider": provider, "api_key": key}
+    data.update(extra)
+    req = urllib.request.Request(
+        base + "/api/config",
+        data=urllib.parse.urlencode(data).encode(),
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def test_http_config_persists_to_env(http_server, monkeypatch, tmp_path):
+    """真实 HTTP：/api/config 保存后应写入 .env，响应标记 persisted=true。"""
+    import config
+
+    monkeypatch.setattr(config, "BASE_DIR", tmp_path)
+    base, _ = http_server
+    resp = _post_config(base, key="sk-http-persist")
+
+    assert resp.get("ok") is True
+    assert resp.get("persisted") is True, "响应应说明已持久化"
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "DEEPSEEK_API_KEY=sk-http-persist" in env_text
+
+
+def test_http_status_reports_need_setup(http_server, monkeypatch):
+    """首次启动引导：未配置 Key 时 /api/status 应标记 need_setup，配置后取消。"""
+    import config
+
+    config.reset_state()  # 清掉运行时配置，只看环境变量
+    monkeypatch.setattr(config, "LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "")
+
+    base, _ = http_server
+    with urllib.request.urlopen(base + "/api/status", timeout=10) as r:
+        st = json.loads(r.read().decode("utf-8"))
+    assert st["need_setup"] is True
+    assert st["has_api_key"] is False
+    assert st["version"]
+    assert st["data_dir"]
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-configured")
+    with urllib.request.urlopen(base + "/api/status", timeout=10) as r:
+        st2 = json.loads(r.read().decode("utf-8"))
+    assert st2["need_setup"] is False
+    assert st2["has_api_key"] is True
+
+
+def test_status_does_not_leak_key(http_server, monkeypatch):
+    """/api/status 绝不能回显密钥本身（只给布尔值）。"""
+    import config
+
+    config.reset_state()
+    monkeypatch.setattr(config, "LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-super-secret-value")
+
+    base, _ = http_server
+    with urllib.request.urlopen(base + "/api/status", timeout=10) as r:
+        raw = r.read().decode("utf-8")
+    assert "sk-super-secret-value" not in raw
+
+
+def test_config_defaults_after_restart_is_covered_by_dotenv_values():
+    """重启生效链路由 test_persist_provider_config_survives_restart 覆盖。
+
+    这里显式说明为什么不直接调用 `dotenv.load_dotenv()` 验证：测试套件出于密封性
+    把 `load_dotenv` 换成了 no-op（见 tests/conftest.py 的 _hermetic_dotenv），
+    在测试里调用它**什么也不会发生**——用它来验证"重启后能读回"会得到一个
+    永远失败（或永远通过）的假信号。正确做法是直接读文件（dotenv_values）。
+    """
+    assert True
+
+
 def test_runtime_provider_config_threadsafe(sample_docs):
     """运行时 provider 配置应支持并发读写（不抛异常、读不到写一半的值）。"""
     from config import get_provider_config, set_runtime_provider_config

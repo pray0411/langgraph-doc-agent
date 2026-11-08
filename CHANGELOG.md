@@ -7,6 +7,34 @@
 
 ## [Unreleased]
 
+### Added（分发形态：别人下载安装包即可用）
+
+目标场景：把 Pray 发给别人，对方下载安装后就能用，不需要 Python、不需要手改配置文件。
+
+- **配置持久化（`config.persist_provider_config`）**：设置面板保存的 API Key 现在会
+  写入 exe 同级 `.env` 并立即生效。此前运行时配置**只存内存**，进程重启即丢 ——
+  分发场景下"每开一次都要重填 Key"是不可用的。实现要点：只合并本函数负责的键
+  （`LLM_PROVIDER` / 对应 `*_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`），**保留用户
+  其他配置与注释**；原子写（临时文件 + `os.replace`）；POSIX 下收紧为 `0o600`；
+  失败时不影响本次运行（响应里带 `persisted` 与原因）。
+- **首次启动引导（`GET /api/status`）**：返回 `need_setup` / `has_api_key` / 版本 /
+  数据目录（**不回显密钥**）。前端启动时查询它，未配置就自动展开设置面板并提示
+  "保存后会写入配置文件，下次启动无需重填"——把用户从"猜为什么问了没反应"引导到
+  "填一个框就行"。
+- **安装器（`installer/`）**：`install.bat` + `install.ps1`，免管理员权限装到
+  `%LOCALAPPDATA%\Programs\Pray`，创建开始菜单/桌面快捷方式、写入卸载项（可在
+  「设置 → 应用」卸载）、生成 `uninstall.ps1/.bat`。默认卸载保留 `generated/`
+  与 `data/`（用户文件与会话记忆），`-PurgeData` 彻底清除。
+  - **安全规则**：安装/打包时**排除 `.env` 与 data/generated/logs/index** ——
+    否则会把含密钥的配置文件和用户私有数据一起发给所有人（实测中确实触发过）。
+  - 另附 `installer/Pray.iss`（Inno Setup 脚本），有 ISCC 的环境可产出带向导的
+    `PraySetup.exe`；无第三方工具环境下 PowerShell 安装器即等价可用。
+
+验证链路（安装版实测）：首次启动 `need_setup=true` → 调 `/api/config` 保存 →
+`persisted=true` 且 `.env` 生成 → 关闭重启后 `Pray.exe --check` 显示
+`API Key=已配置`。
+
+
 ### Fixed（第四轮外部评审 · 结果对齐与指标可信度）
 
 评审的核心指控是"**证据与宣称不匹配**"：安全与测试基建是真功夫，但有两处

@@ -328,6 +328,10 @@ class Handler(BaseHTTPRequestHandler):
             if not self._auth_required():
                 return
             self._json({"mode": get_mode(), "available_modes": available_modes()})
+        elif path == "/api/status":
+            if not self._auth_required():
+                return
+            self._handle_status()
         elif path == "/api/sessions":
             if not self._auth_required():
                 return
@@ -513,8 +517,28 @@ class Handler(BaseHTTPRequestHandler):
         set_mode(mode)
         self._json({"mode": get_mode(), "message": f"已切换到 {mode} 模式"})
 
+    def _handle_status(self):
+        """运行时状态（首次启动引导用）：是否已完成 API Key 配置、版本、数据目录。
+
+        只返回"是否配置"的布尔值，**不返回密钥本身**——这个接口的意义是让前端
+        在首次启动时判断该不该弹出配置面板，而不是把凭据暴露给页面。
+        """
+        from config import APP_VERSION, BASE_DIR, LLM_PROVIDER, get_provider_config
+
+        cfg = get_provider_config(LLM_PROVIDER)
+        has_key = bool((cfg.get("api_key") or "").strip())
+        self._json({
+            "version": APP_VERSION,
+            "provider": LLM_PROVIDER,
+            "mode": get_mode(),
+            "available_modes": available_modes(),
+            "has_api_key": has_key,
+            "need_setup": not has_key,   # 前端据此自动展开设置面板
+            "data_dir": str(BASE_DIR),
+        })
+
     def _handle_set_config(self):
-        """网页端更换 API Key / 模型配置（支持所有预设服务商）。"""
+        """网页端更换 API Key / 模型配置（支持所有预设服务商），并持久化到 .env。"""
         length = int(self.headers.get("Content-Length", 0))
         if length > MAX_BODY:
             self._json({"error": "请求体过大"}, 413)
@@ -534,15 +558,30 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "API Key 不能为空"}, 400)
             return
 
-        from config import set_runtime_provider_config
+        from config import persist_provider_config, set_runtime_provider_config
+
         set_runtime_provider_config(provider, api_key, base_url, model)
+
+        # 持久化到 .env：只存内存的话，进程一重启 Key 就没了 ——
+        # "把安装包发给别人、填一次就能用"必须依赖这一步。
+        persisted = False
+        persist_note = ""
+        try:
+            env_path = persist_provider_config(provider, api_key, base_url, model)
+            persisted = True
+            persist_note = f"，已保存到 {env_path.name}（重启后仍生效）"
+        except Exception as exc:  # noqa: BLE001 - 持久化失败不应让本次配置失效
+            persist_note = f"（写入 .env 失败：{exc}；本次运行仍可用，但重启后需重填）"
+            audit("config_persist_failed", provider=provider, error=type(exc).__name__)
+
         audit("config_update", provider=provider, base_url=base_url or "(preset)",
-              model=model or "(preset)")
+              model=model or "(preset)", persisted=persisted)
         self._json(
             {
                 "ok": True,
-                "message": f"{provider} API Key 已更新（仅本次运行有效）",
+                "message": f"{provider} API Key 已更新{persist_note}",
                 "provider": provider,
+                "persisted": persisted,
             }
         )
 

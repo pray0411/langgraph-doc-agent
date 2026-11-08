@@ -1556,6 +1556,28 @@ function openTerminal(code, codeId) {
 loadMode();
 loadSessions();
 
+/* ===== 首次启动引导 =====
+   分发场景（安装包发给别人）最常见的第一道坎是"没有 API Key，问了没反应"。
+   这里在启动时查一次状态：未配置就自动展开设置面板并说明"保存后会写入配置，
+   下次启动无需重填"——把用户从"猜为什么不能用"引导到"填一个框就行"。 */
+async function loadStatus() {
+  try {
+    const resp = await fetch('/api/status', { headers: authHeaders({}) });
+    if (!resp.ok) return;
+    const st = await resp.json();
+    if (st && st.provider) cfgProvider.value = st.provider;
+    if (st && st.need_setup) {
+      keyPanel.classList.add('open');
+      cfgMsg.style.color = 'var(--text-dim)';
+      cfgMsg.textContent = '首次使用：请填写 API Key。保存后会写入配置文件，下次启动无需重填。';
+      if (cfgApiKey) cfgApiKey.focus();
+    }
+  } catch (err) {
+    /* 状态接口不可用（旧版后端 / 网络异常）时静默，不影响主流程 */
+  }
+}
+loadStatus();
+
 /* ===== 文档上传 ===== */
 const uploadBtn = document.getElementById('uploadBtn');
 const fileInput = document.getElementById('fileInput');

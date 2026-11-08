@@ -160,36 +160,43 @@ python -X utf8 mcp_demo.py              # 内置演示客户端，无需第三�
 
 ### 桌面应用
 
-分为**直接使用**与**从源码打包**两条路径。
+分为**分发给别人用**、**本机使用**与**从源码打包**三条路径。
 
-**直接使用（推荐给最终用户）**：从 [Releases](https://github.com/pray0411/langgraph-doc-agent/releases) 下载 `Pray-<版本>-win64.zip`，解压后双击 `Pray.exe`。目标电脑**无需安装 Python**。首次使用需在同目录放置 `.env` 填写 API Key（同目录的 `.env.example` 可直接改名使用）；生成的代码、会话记忆、索引与日志都保存在 exe 同级目录，整个过程是绿色便携的。
+#### 分发给别人（安装包）
 
-自检与排查：
+从 [Releases](https://github.com/pray0411/langgraph-doc-agent/releases) 下载 `Pray-<版本>-win64.zip`，解压后：
+
+- **双击 `install.bat`** → 安装到 `%LOCALAPPDATA%\Programs\Pray`（**无需管理员权限**）、创建开始菜单与桌面快捷方式、注册卸载项（可在「设置 → 应用」中正常卸载）
+- 或**直接双击 `Pray.exe`** 当绿色版用，不安装
+
+安装目录里有 `uninstall.bat`；默认卸载**保留** `generated/` 与 `data/`（用户的文件与会话记忆），彻底清除用 `uninstall.bat -PurgeData`。
+
+**首次配置只需一次**：第一次启动时界面会**自动弹出设置面板**提示填写 API Key；保存后写入程序目录下的 `.env`，**下次启动无需重填**（此前运行时配置只存内存、重启即丢，是分发场景最大的一道坎，已修）。也可用 `Pray.exe --check` 随时核对：
 
 ```bash
-Pray.exe --check                  # 输出页面状态、版本、provider、API Key 是否已配置、数据目录
-Pray.exe --no-update-check        # 跳过启动时的版本检查
+Pray.exe --check        # 页面状态 / 版本 / provider / API Key 是否已配置 / 数据目录
 ```
 
-**从源码运行 / 打包**：
+> 分发形态说明：安装器基于 PowerShell（`installer/install.ps1`），**不依赖任何第三方打包工具**，因此在没有 Inno Setup 的环境里也能构建。仓库同时保留 `installer/Pray.iss`（Inno Setup 脚本），装了 ISCC 的环境可以用它产出带向导界面的 `PraySetup.exe`。
+
+#### 本机使用 / 从源码打包
 
 ```bash
 pip install -r requirements-desktop.txt
 python -X utf8 desktop.py             # 独立窗口（端口自动选空闲）
 python -X utf8 desktop.py --check     # 无窗口自检
 
-build_exe.bat                         # 一键打包（Windows；等价于下面两条命令）
-pip install pyinstaller
-pyinstaller Pray.spec --noconfirm --clean
+build_exe.bat                         # 一键打包（Windows）
+# 或：pip install pyinstaller && pyinstaller Pray.spec --noconfirm --clean
 ```
 
 后台线程运行与网页版相同的服务，pywebview 使用系统 WebView（Windows 为 Edge WebView2），不引入 Chromium/Electron 体积。启动时异步检查 GitHub Releases，有新版本弹窗提示（不自动替换自身）。`Pray.spec` 默认排除 torch / sentence-transformers，产物约 70 MB（压缩包）/ 解压后约 200 MB，检索自动回退纯 BM25。
 
-打包后的路径语义：**只读资源**（`VERSION`、`static/`）随包分发、从解包目录读取；**可写数据**（`generated/`、`data/`、`index/`、`logs/`）与 `.env` 一律锚定到 exe 所在目录（`config.BASE_DIR` 在 frozen 模式下指向 exe 同级目录），否则数据会落在 PyInstaller 的临时目录里、进程退出即丢失。
+打包后的路径语义：**只读资源**（`VERSION`、`static/`）随包分发、从解包目录读取；**可写数据**（`generated/`、`data/`、`index/`、`logs/`）与 `.env` 一律锚定到 exe 所在目录（`config.BASE_DIR` 在 frozen 模式下指向 exe 同级目录），否则数据会落在 PyInstaller 的临时目录里、进程退出即丢失。安装器据此把程序装到**用户可写**的 `%LOCALAPPDATA%`，而不是需要管理员权限的 `Program Files`。
 
-发布新版本：把 `VERSION` 与 `CHANGELOG.md` 更新后打 tag，在 GitHub Release 上传该 zip（exe 体积大，不进入仓库，`dist/` 已在 `.gitignore` 中）。
+发布新版本：更新 `VERSION` 与 `CHANGELOG.md` → 打 tag → 在 GitHub Release 上传 `dist/Pray-<版本>-win64.zip`（exe 体积大，不进入仓库，`dist/` 已在 `.gitignore` 中）。构建分发包时必须**排除 `.env` 与用户数据目录**（安装器已内置该规则）。
 
-> 仅想从源码 zip 快速跑起来（不打包 exe）：解压后双击 `启动.bat`，脚本会依次检查 Python、首次自动安装依赖、创建 `.env` 模板，然后启动桌面窗口（缺 pywebview 时回退网页版）。
+> 仅想从源码 zip 快速跑起来（不打包 exe）：解压后双击 `start-pray.bat`，脚本会依次检查 Python、首次自动安装依赖、创建 `.env` 模板，然后启动桌面窗口（缺 pywebview 时回退网页版）。
 
 ## HTTP API
 

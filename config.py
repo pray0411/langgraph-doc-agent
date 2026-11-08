@@ -307,6 +307,72 @@ def reset_state() -> None:
         _runtime_config_version += 1
 
 
+def persist_provider_config(provider: str, api_key: str, base_url: str = "", model: str = "") -> Path:
+    """把 provider 配置持久化写入 `BASE_DIR/.env`，返回写入路径。
+
+    为什么需要（分发可用性的底线）：`set_runtime_provider_config()` 只写内存，
+    进程一重启就没了 —— 用户每开一次程序都要重填 Key。把配置写进 `.env` 之后，
+    下次启动时 `load_dotenv()` 会自动读回，"填一次、永久生效"才成立。
+
+    写入的键（其余行原样保留，绝不整文件重写）：
+        LLM_PROVIDER=<provider>
+        <该 provider 的 API Key 环境变量>=<api_key>
+        LLM_BASE_URL=<base_url>   —— 仅当显式提供
+        LLM_MODEL=<model>         —— 仅当显式提供
+
+    安全约定：
+    - 只合并本函数负责的这几个键，**保留文件中的其他内容与注释**（误覆盖用户
+      配置是比"没保存"更糟的结果）
+    - 原子写入（临时文件 + os.replace），避免写一半留下损坏的 .env
+    - POSIX 下收紧为 0o600；密钥不打印、不写日志
+    """
+    provider = (provider or "").strip().lower()
+    preset = PROVIDER_PRESETS.get(provider)
+    if not preset:
+        raise ValueError(f"未知 provider: {provider}")
+    api_key = (api_key or "").strip()
+    if not api_key:
+        raise ValueError("API Key 不能为空")
+
+    updates: dict[str, str] = {
+        "LLM_PROVIDER": provider,
+        preset["api_key_env"]: api_key,
+    }
+    if (base_url or "").strip():
+        updates["LLM_BASE_URL"] = base_url.strip()
+    if (model or "").strip():
+        updates["LLM_MODEL"] = model.strip()
+
+    env_path = Path(BASE_DIR) / ".env"
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+
+    written: set[str] = set()
+    merged: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        key = stripped.split("=", 1)[0].strip() if "=" in stripped and not stripped.startswith("#") else None
+        if key in updates:
+            merged.append(f"{key}={updates[key]}")
+            written.add(key)
+        else:
+            merged.append(line)  # 其他键/注释/空行原样保留
+    for key, value in updates.items():
+        if key not in written:
+            merged.append(f"{key}={value}")
+
+    tmp_path = env_path.with_name(env_path.name + ".tmp")
+    tmp_path.write_text("\n".join(merged).rstrip() + "\n", encoding="utf-8")
+    try:
+        os.chmod(tmp_path, 0o600)  # POSIX 收紧；Windows 下无实际效果但不报错
+    except OSError:
+        pass
+    os.replace(tmp_path, env_path)
+
+    # 当前进程立即生效（无需重启即可继续对话）
+    os.environ.update(updates)
+    return env_path
+
+
 def get_provider_config(provider: str) -> dict:
     """获取 provider 的有效配置（优先运行时设置，回退预设默认）。
 
