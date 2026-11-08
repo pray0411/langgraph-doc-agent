@@ -164,12 +164,12 @@ python -X utf8 mcp_demo.py              # 内置演示客户端，无需第三�
 
 #### 分发给别人（安装包）
 
-从 [Releases](https://github.com/pray0411/langgraph-doc-agent/releases) 下载 `Pray-<版本>-win64.zip`，解压后：
+从 [Releases](https://github.com/pray0411/langgraph-doc-agent/releases) 下载，两种产物任选其一：
 
-- **双击 `install.bat`** → 安装到 `%LOCALAPPDATA%\Programs\Pray`（**无需管理员权限**）、创建开始菜单与桌面快捷方式、注册卸载项（可在「设置 → 应用」中正常卸载）
-- 或**直接双击 `Pray.exe`** 当绿色版用，不安装
+- **`PraySetup.exe`（单文件安装器，推荐）**：双击 → 确认 → 装好。无需解压、无需 Python、无需管理员权限；内嵌完整应用包（约 74 MB）。
+- **`Pray-<版本>-win64.zip`（绿色包）**：解压后**双击 `install.bat`** 安装，或**直接双击 `Pray.exe`** 当绿色版用。
 
-安装目录里有 `uninstall.bat`；默认卸载**保留** `generated/` 与 `data/`（用户的文件与会话记忆），彻底清除用 `uninstall.bat -PurgeData`。
+两者都安装到 `%LOCALAPPDATA%\Programs\Pray`（**无需管理员权限**）、创建开始菜单与桌面快捷方式、注册卸载项（可在「设置 → 应用」中正常卸载）；安装目录里有 `uninstall.bat`，默认卸载**保留** `generated/` 与 `data/`（用户的文件与会话记忆），彻底清除用 `uninstall.bat -PurgeData`。
 
 **首次配置只需一次**：第一次启动时界面会**自动弹出设置面板**提示填写 API Key；保存后写入程序目录下的 `.env`，**下次启动无需重填**（此前运行时配置只存内存、重启即丢，是分发场景最大的一道坎，已修）。也可用 `Pray.exe --check` 随时核对：
 
@@ -177,7 +177,9 @@ python -X utf8 mcp_demo.py              # 内置演示客户端，无需第三�
 Pray.exe --check        # 页面状态 / 版本 / provider / API Key 是否已配置 / 数据目录
 ```
 
-> 分发形态说明：安装器基于 PowerShell（`installer/install.ps1`），**不依赖任何第三方打包工具**，因此在没有 Inno Setup 的环境里也能构建。仓库同时保留 `installer/Pray.iss`（Inno Setup 脚本），装了 ISCC 的环境可以用它产出带向导界面的 `PraySetup.exe`。
+自建分发包：`python installer/build_installer.py` 一条命令产出上述两个文件（需先 `pyinstaller Pray.spec` 出 `dist/Pray/`）。打包逻辑本地与 CI 共用同一份代码，脚本强制排除 `.env` 与 `data/generated/logs/index`，构建后再扫一遍并在发现问题时中止；release workflow 另有独立校验。
+
+> 分发形态说明：安装器**不依赖任何第三方打包工具**——单文件安装器由 PyInstaller 把「应用 zip + `install.ps1`」打包而成，安装逻辑复用同一份被验证过的 PowerShell 脚本，避免两套实现慢慢漂移。仓库另保留 `installer/Pray.iss`（Inno Setup 脚本），装了 ISCC 的环境可用它产出带向导界面的安装器。
 
 #### 本机使用 / 从源码打包
 
@@ -194,7 +196,7 @@ build_exe.bat                         # 一键打包（Windows）
 
 打包后的路径语义：**只读资源**（`VERSION`、`static/`）随包分发、从解包目录读取；**可写数据**（`generated/`、`data/`、`index/`、`logs/`）与 `.env` 一律锚定到 exe 所在目录（`config.BASE_DIR` 在 frozen 模式下指向 exe 同级目录），否则数据会落在 PyInstaller 的临时目录里、进程退出即丢失。安装器据此把程序装到**用户可写**的 `%LOCALAPPDATA%`，而不是需要管理员权限的 `Program Files`。
 
-发布新版本：更新 `VERSION` 与 `CHANGELOG.md` → 打 tag → 在 GitHub Release 上传 `dist/Pray-<版本>-win64.zip`（exe 体积大，不进入仓库，`dist/` 已在 `.gitignore` 中）。构建分发包时必须**排除 `.env` 与用户数据目录**（安装器已内置该规则）。
+发布新版本：更新 `VERSION` 与 `CHANGELOG.md` → 打 tag → release workflow 自动产出 `dist/Pray-<版本>-win64.zip` 与 `dist/PraySetup.exe` 并附到 Release（exe 体积大，不进入仓库，`dist/` 已在 `.gitignore` 中）。本地构建同样走 `installer/build_installer.py`，两条路径共用同一份打包代码。
 
 > 仅想从源码 zip 快速跑起来（不打包 exe）：解压后双击 `start-pray.bat`，脚本会依次检查 Python、首次自动安装依赖、创建 `.env` 模板，然后启动桌面窗口（缺 pywebview 时回退网页版）。
 

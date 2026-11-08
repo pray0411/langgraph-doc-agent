@@ -21,16 +21,35 @@
   数据目录（**不回显密钥**）。前端启动时查询它，未配置就自动展开设置面板并提示
   "保存后会写入配置文件，下次启动无需重填"——把用户从"猜为什么问了没反应"引导到
   "填一个框就行"。
-- **安装器（`installer/`）**：`install.bat` + `install.ps1`，免管理员权限装到
-  `%LOCALAPPDATA%\Programs\Pray`，创建开始菜单/桌面快捷方式、写入卸载项（可在
-  「设置 → 应用」卸载）、生成 `uninstall.ps1/.bat`。默认卸载保留 `generated/`
-  与 `data/`（用户文件与会话记忆），`-PurgeData` 彻底清除。
-  - **安全规则**：安装/打包时**排除 `.env` 与 data/generated/logs/index** ——
-    否则会把含密钥的配置文件和用户私有数据一起发给所有人（实测中确实触发过）。
+- **安装器（`installer/`）**：两种形态、同一套安装逻辑。
+  - **单文件安装器 `PraySetup.exe`**（推荐给最终用户）：内嵌应用包，双击即装，
+    零依赖、不需要 Python、不需要管理员权限。Shell 是 PyInstaller 打出的
+    单文件 exe（约 74 MB，内嵌 67 MB 应用包），安装逻辑直接复用被验证过的
+    `install.ps1`，避免"GUI 版和命令行版各写一套、慢慢漂移"。交互模式用
+    `ctypes` 原生 MessageBoxW（目标运行时不带 tkinter），另支持
+    `--silent [--dir <目标>] [--no-shortcuts]` 供自动化验证。
+  - **脚本安装器**：`install.bat` + `install.ps1`，解压 zip 后运行即可。
+  - 两种形态都装到 `%LOCALAPPDATA%\Programs\Pray`，创建开始菜单/桌面快捷方式、
+    写入卸载项（可在「设置 → 应用」卸载）、生成 `uninstall.ps1/.bat`。默认卸载
+    保留 `generated/` 与 `data/`（用户文件与会话记忆），`-PurgeData` 彻底清除。
+  - **构建脚本 `installer/build_installer.py`**：一条命令产出两个分发产物
+    （`dist/Pray-<VERSION>-win64.zip`、`dist/PraySetup.exe`），本地与 CI 共用
+    同一份代码 —— 发布流程里最容易出错的是"人肉复制"（漏 VERSION、混进 `.env`、
+    包里的脚本与仓库不一致），这些错误没有命令会报错，只有用户装上才发现。
+  - **安全规则**：安装/打包时**排除 `.env` 与 data/generated/logs/index**。
+    脚本构建完后会再扫一遍 staging 目录，发现 `.env` 或用户数据目录直接中止；
+    release workflow 里还有一道独立校验（打开 zip 断言无密钥文件、含
+    `install.ps1` 与 `Pray.exe`）。
   - 另附 `installer/Pray.iss`（Inno Setup 脚本），有 ISCC 的环境可产出带向导的
-    `PraySetup.exe`；无第三方工具环境下 PowerShell 安装器即等价可用。
+    安装器；无第三方工具环境下 `PraySetup.exe` 即等价可用（本机 ISCC 下载失败，
+    故以自带安装器为准）。
 
-验证链路（安装版实测）：首次启动 `need_setup=true` → 调 `/api/config` 保存 →
+验证链路（安装版实测）：`PraySetup.exe --silent --dir <tmp> --no-shortcuts`
+→ 退出码 0、目标目录含 `Pray.exe` / `VERSION` / `.env.example` / 安装脚本、
+**无 `.env`**；HKCU 卸载项 `DisplayName=Pray`、`DisplayVersion` 与 VERSION 一致；
+运行生成的 `uninstall.bat -PurgeData` 后目录与注册表项均被清除。
+
+应用内链路：首次启动 `need_setup=true` → 调 `/api/config` 保存 →
 `persisted=true` 且 `.env` 生成 → 关闭重启后 `Pray.exe --check` 显示
 `API Key=已配置`。
 

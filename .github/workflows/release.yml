@@ -54,10 +54,35 @@ jobs:
         env:
           PYTHONUTF8: "1"
         run: pyinstaller --clean --noconfirm Pray.spec
+      # 应用 zip + 单文件安装器 PraySetup.exe。打包逻辑在脚本里，
+      # 与本地构建共用同一份代码，避免"人肉复制漏文件 / 混进 .env"。
+      - name: 构建分发包（zip + PraySetup.exe）
+        env:
+          PYTHONUTF8: "1"
+        run: python installer/build_installer.py
+      - name: 校验分发包不含密钥与用户数据
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          zip="dist/Pray-${version}-win64.zip"
+          python - "$zip" <<'PY'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          bad = [n for n in names if n == ".env" or n.startswith((".env/", "data/", "generated/", "logs/", "index/"))]
+          assert not bad, f"分发包含不该有的文件: {bad[:5]}"
+          assert any(n.endswith("install.ps1") for n in names), "分发包缺少 install.ps1"
+          assert any(n.endswith("Pray.exe") for n in names), "分发包缺少 Pray.exe"
+          print(f"分发包校验通过: {len(names)} 个条目")
+          PY
+          test -f dist/PraySetup.exe
+          ls -lh dist/Pray*.zip dist/PraySetup.exe
       - uses: actions/upload-artifact@v4
         with:
           name: Pray-windows
-          path: dist/**
+          path: |
+            dist/Pray-*-win64.zip
+            dist/PraySetup.exe
           if-no-files-found: error
 
   # ---------- 发布 Release ----------
