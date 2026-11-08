@@ -188,7 +188,7 @@ pip install -r requirements-desktop.txt
 python -X utf8 desktop.py             # 独立窗口（端口自动选空闲）
 python -X utf8 desktop.py --check     # 无窗口自检
 
-build_exe.bat                         # 一键打包（Windows）
+build-exe.bat                         # 一键打包（Windows，末尾可选产出分发包）
 # 或：pip install pyinstaller && pyinstaller Pray.spec --noconfirm --clean
 ```
 

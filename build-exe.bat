@@ -46,12 +46,36 @@ echo   Double-click it to run (no Python required on target PC).
 echo ============================================================
 
 rem ---------- carry over .env so the exe finds the API key ----------
+rem NOTE: this copies the real key next to the exe for LOCAL testing only.
+rem installer/build_installer.py explicitly excludes .env from packages.
 if exist ".env" (
     copy /y ".env" "dist\Pray\.env" >nul
-    echo   Copied .env next to Pray.exe
+    echo   Copied .env next to Pray.exe  ^(local run only - never packaged^)
 ) else (
     echo   [WARN] No .env in project root - create dist\Pray\.env manually
     echo          before running the exe.
 )
+echo.
+echo ============================================================
+echo   Build the distributable package?  (zip + PraySetup.exe)
+echo   Requires the exe above to be built first.
+echo ============================================================
+set /p ANSWER=Build installer now? [Y/n] 
+if /i "%ANSWER%"=="n" (
+    echo   Skipped. Run: python installer\build_installer.py
+    echo.
+    pause
+    exit /b 0
+)
+python installer\build_installer.py
+if errorlevel 1 (
+    echo.
+    echo [ERROR] Packaging failed. See output above.
+    pause
+    exit /b 1
+)
+echo.
+echo   dist\Pray-VERSION-win64.zip     ^(send this to others^)
+echo   dist\PraySetup.exe              ^(send this to others, simplest^)
 echo.
 pause
