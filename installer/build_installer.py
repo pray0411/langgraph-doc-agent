@@ -115,6 +115,27 @@ def _ignore_user_data(directory: str, names: list[str]) -> set[str]:
     return {n for n in names if n in SKIP_NAMES or Path(n).suffix in SKIP_SUFFIXES}
 
 
+def verify_zip(path: Path) -> None:
+    """打包结果自检：不含密钥/用户数据，且必须含运行所需文件。
+
+    和打 zip 绑在一起而不是只在 CI 里做——本地构建同样需要它；
+    失败信息写清楚"哪些文件不该在 / 缺了什么"，避免出现"CI 红了看不出原因"。
+    """
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+    bad = [
+        n for n in names
+        if n == ".env" or n.startswith((".env/", "data/", "generated/", "logs/", "index/"))
+    ]
+    if bad:
+        raise SystemExit(f"[build] 分发包含禁止内容: {bad[:5]}（共 {len(bad)} 项）")
+    required = {"install.ps1", "install.bat", "Pray.exe", "VERSION"}
+    missing = sorted(required - set(names))
+    if missing:
+        raise SystemExit(f"[build] 分发包缺少必需文件: {missing}")
+    print(f"[build] 自检通过: {len(names)} 个条目，无 .env / 用户数据，必需文件齐全")
+
+
 def build_zip(version: str) -> Path:
     target = DIST / f"Pray-{version}-win64.zip"
     if target.exists():
@@ -127,6 +148,7 @@ def build_zip(version: str) -> Path:
                 count += 1
     size_mb = target.stat().st_size / 1024 / 1024
     print(f"[build] 应用包: {target.name}  ({count} 个文件, {size_mb:.1f} MB)")
+    verify_zip(target)
     return target
 
 
